@@ -10,10 +10,9 @@ import numpy as np
 import pandas as pd
 
 from config import (
+    OUTPUT_EVENT_PANEL,
+    OUTPUT_NEWS_PANEL,
     OUTPUT_EVENT_MATCHES,
-    OUTPUT_KALSHI_EVENTS,
-    OUTPUT_POLYMARKET_EVENTS,
-    OUTPUT_NEWS_DATASET,
 )
 
 
@@ -58,14 +57,14 @@ def sequence_score(a: object, b: object) -> float:
     return SequenceMatcher(None, na, nb).ratio()
 
 
-def date_proximity_score(pm_time: pd.Timestamp, news_time: pd.Timestamp) -> float:
-    pm_time = pd.to_datetime(pm_time, utc=True, errors="coerce")
+def date_proximity_score(event_time: pd.Timestamp, news_time: pd.Timestamp) -> float:
+    event_time = pd.to_datetime(event_time, utc=True, errors="coerce")
     news_time = pd.to_datetime(news_time, utc=True, errors="coerce")
 
-    if pd.isna(pm_time) or pd.isna(news_time):
+    if pd.isna(event_time) or pd.isna(news_time):
         return 0.0
 
-    delta_minutes = abs((news_time - pm_time).total_seconds()) / 60.0
+    delta_minutes = abs((news_time - event_time).total_seconds()) / 60.0
 
     if delta_minutes <= 60:
         return 1.0
@@ -81,14 +80,14 @@ def date_proximity_score(pm_time: pd.Timestamp, news_time: pd.Timestamp) -> floa
 
 
 def weighted_match_score(
-    pm_title: object,
+    event_title: object,
     news_title: object,
-    pm_time: pd.Timestamp,
+    event_time: pd.Timestamp,
     news_time: pd.Timestamp,
 ) -> float:
-    jac = jaccard_score(pm_title, news_title)
-    seq = sequence_score(pm_title, news_title)
-    prox = date_proximity_score(pm_time, news_time)
+    jac = jaccard_score(event_title, news_title)
+    seq = sequence_score(event_title, news_title)
+    prox = date_proximity_score(event_time, news_time)
     score = 0.45 * jac + 0.35 * seq + 0.20 * prox
     return float(round(score, 6))
 
@@ -103,103 +102,80 @@ def _safe_read_csv(path: str | Path) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def load_event_sources() -> pd.DataFrame:
-    pm = _safe_read_csv(OUTPUT_POLYMARKET_EVENTS)
-    ka = _safe_read_csv(OUTPUT_KALSHI_EVENTS)
+def load_event_panel() -> pd.DataFrame:
+    df = _safe_read_csv(OUTPUT_EVENT_PANEL)
+    if df.empty:
+        return df
 
-    frames: list[pd.DataFrame] = []
+    df = df.copy()
+    df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True, errors="coerce", format="mixed")
 
-    if not pm.empty:
-        pm = pm.copy()
-        if "title" in pm.columns and "polymarket_title" not in pm.columns:
-            pm["polymarket_title"] = pm["title"]
-        if "timestamp" in pm.columns and "polymarket_time" not in pm.columns:
-            pm["polymarket_time"] = pm["timestamp"]
-        if "source" not in pm.columns:
-            pm["source"] = "polymarket"
-        frames.append(pm)
+    # Normalize to matcher schema
+    df["polymarket_time"] = df["timestamp_utc"]
+    df["polymarket_title"] = df["market_title"]
+    df["leader"] = df.get("source_provider", np.nan)
+    df["symbol"] = df.get("market_ref", np.nan)
+    df["country"] = np.nan
+    df["bucket"] = np.nan
+    df["source"] = df.get("platform", "event_panel")
 
-    if not ka.empty:
-        ka = ka.copy()
-        if "title" in ka.columns and "polymarket_title" not in ka.columns:
-            ka["polymarket_title"] = ka["title"]
-        if "timestamp" in ka.columns and "polymarket_time" not in ka.columns:
-            ka["polymarket_time"] = ka["timestamp"]
-        if "source" not in ka.columns:
-            ka["source"] = "kalshi"
-        frames.append(ka)
-
-    if not frames:
-        return pd.DataFrame()
-
-    df = pd.concat(frames, ignore_index=True, sort=False)
-
-    if "seed_label" not in df.columns:
-        df["seed_label"] = np.nan
-    if "polymarket_title" not in df.columns:
-        df["polymarket_title"] = np.nan
-    if "polymarket_time" not in df.columns:
-        df["polymarket_time"] = np.nan
-    if "leader" not in df.columns:
-        df["leader"] = np.nan
-
-    df["polymarket_time"] = pd.to_datetime(df["polymarket_time"], utc=True, errors="coerce")
     return df
 
 
-def load_news() -> pd.DataFrame:
-    news = _safe_read_csv(OUTPUT_NEWS_DATASET)
-    if news.empty:
-        return news
+def load_news_panel() -> pd.DataFrame:
+    df = _safe_read_csv(OUTPUT_NEWS_PANEL)
+    if df.empty:
+        return df
 
-    news = news.copy()
+    df = df.copy()
+    df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True, errors="coerce", format="mixed")
 
-    if "title" in news.columns and "news_title" not in news.columns:
-        news["news_title"] = news["title"]
+    # Normalize to matcher schema
+    df["news_time"] = df["timestamp_utc"]
+    df["news_title"] = df["market_title"]
 
-    if "timestamp_utc" in news.columns and "news_time" not in news.columns:
-        news["news_time"] = news["timestamp_utc"]
-    elif "published_at" in news.columns and "news_time" not in news.columns:
-        news["news_time"] = news["published_at"]
-    elif "timestamp" in news.columns and "news_time" not in news.columns:
-        news["news_time"] = news["timestamp"]
-
-    if "news_title" not in news.columns:
-        news["news_title"] = np.nan
-    if "news_time" not in news.columns:
-        news["news_time"] = np.nan
-
-    news["news_time"] = pd.to_datetime(news["news_time"], utc=True, errors="coerce")
-    return news
+    return df
 
 
 def best_news_match_for_event(
-    pm_title: object,
-    pm_time: pd.Timestamp,
+    event_title: object,
+    event_time: pd.Timestamp,
     news_df: pd.DataFrame,
+    seed_label: object = None,
     min_match_score: float = 0.15,
 ) -> dict | None:
     """
-    Strict match window:
-    - news must be within [pm_time - 7 days, pm_time + 2 days]
+    Strict window:
+    - same seed_label if available
+    - news within [event_time - 7 days, event_time + 2 days]
     - no fallback to full dataset
     - reject weak matches
     """
-    pm_time = pd.to_datetime(pm_time, utc=True, errors="coerce")
-    if pd.isna(pm_time) or news_df.empty:
+    event_time = pd.to_datetime(event_time, utc=True, errors="coerce")
+    if pd.isna(event_time) or news_df.empty:
         return None
 
-    candidates = news_df[
-        (news_df["news_time"].notna()) &
-        (news_df["news_time"] >= pm_time - pd.Timedelta(days=7)) &
-        (news_df["news_time"] <= pm_time + pd.Timedelta(days=2))
+    candidates = news_df.copy()
+
+    if seed_label is not None and "seed_label" in candidates.columns:
+        candidates = candidates[candidates["seed_label"] == seed_label]
+
+    candidates = candidates[
+        (candidates["news_time"].notna()) &
+        (candidates["news_time"] >= event_time - pd.Timedelta(days=7)) &
+        (candidates["news_time"] <= event_time + pd.Timedelta(days=2))
     ].copy()
 
     if candidates.empty:
         return None
 
     candidates["match_score"] = candidates.apply(
-        lambda r: weighted_match_score(pm_title, r.get("news_title"), pm_time, r.get("news_time")),
+        lambda r: weighted_match_score(
+            event_title,
+            r.get("news_title"),
+            event_time,
+            r.get("news_time"),
+        ),
         axis=1,
     )
 
@@ -225,10 +201,9 @@ def build_event_matches(
     lag_cap_minutes: float = 10080.0,
 ) -> pd.DataFrame:
     """
-    lead_lag_minutes convention:
-      news_time - polymarket_time
-      positive => news after event
-      negative => news before event
+    lead_lag_minutes = news_time - polymarket_time
+    positive => news after market event
+    negative => news before market event
     """
     if events_df.empty:
         return pd.DataFrame()
@@ -236,10 +211,17 @@ def build_event_matches(
     rows: list[dict] = []
 
     for _, ev in events_df.iterrows():
-        pm_title = ev.get("polymarket_title")
-        pm_time = pd.to_datetime(ev.get("polymarket_time"), utc=True, errors="coerce")
+        event_title = ev.get("polymarket_title")
+        event_time = pd.to_datetime(ev.get("polymarket_time"), utc=True, errors="coerce")
+        seed_label = ev.get("seed_label")
 
-        best = best_news_match_for_event(pm_title, pm_time, news_df)
+        best = best_news_match_for_event(
+            event_title=event_title,
+            event_time=event_time,
+            news_df=news_df,
+            seed_label=seed_label,
+            min_match_score=0.15,
+        )
 
         match_score = np.nan
         news_title = np.nan
@@ -251,27 +233,24 @@ def build_event_matches(
             news_time = pd.to_datetime(best.get("news_time"), utc=True, errors="coerce")
             match_score = best.get("match_score", np.nan)
 
-            if pd.isna(pm_time) or pd.isna(news_time):
-                lead_lag_minutes = np.nan
-            else:
-                lead_lag_minutes = (news_time - pm_time).total_seconds() / 60.0
-
+            if pd.notna(event_time) and pd.notna(news_time):
+                lead_lag_minutes = (news_time - event_time).total_seconds() / 60.0
                 if abs(lead_lag_minutes) > lag_cap_minutes:
                     lead_lag_minutes = np.nan
 
         rows.append(
             {
-                "seed_label": ev.get("seed_label"),
+                "seed_label": seed_label,
                 "symbol": ev.get("symbol"),
                 "country": ev.get("country"),
                 "bucket": ev.get("bucket"),
                 "leader": ev.get("leader"),
                 "source": ev.get("source"),
-                "polymarket_title": pm_title,
+                "polymarket_title": event_title,
                 "news_title": news_title,
-                "polymarket_time": pm_time,
+                "polymarket_time": event_time,
                 "news_time": news_time,
-                "event_time": news_time if pd.notna(news_time) else pm_time,
+                "event_time": news_time if pd.notna(news_time) else event_time,
                 "match_score": match_score,
                 "lead_lag_minutes": lead_lag_minutes,
             }
@@ -279,25 +258,24 @@ def build_event_matches(
 
     out = pd.DataFrame(rows)
 
-    sort_cols = [c for c in ["seed_label", "event_time", "symbol"] if c in out.columns]
-    if sort_cols:
-        out = out.sort_values(sort_cols).reset_index(drop=True)
+    if not out.empty:
+        out = out.sort_values(["seed_label", "event_time", "symbol"], na_position="last").reset_index(drop=True)
 
     return out
 
 
 def main() -> None:
-    events_df = load_event_sources()
-    news_df = load_news()
+    events_df = load_event_panel()
+    news_df = load_news_panel()
 
     if events_df.empty:
-        print("No event source rows found.")
+        print("No event panel rows found.")
         pd.DataFrame().to_csv(OUTPUT_EVENT_MATCHES, index=False)
         print(f"Saved empty file: {OUTPUT_EVENT_MATCHES}")
         return
 
     if news_df.empty:
-        print("No news rows found.")
+        print("No news panel rows found.")
         out = events_df.copy()
         out["news_title"] = np.nan
         out["news_time"] = pd.NaT

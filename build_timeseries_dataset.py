@@ -1,5 +1,7 @@
 # build_timeseries_dataset.py
 
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 
@@ -11,16 +13,16 @@ from config import (
 )
 
 
-def load_event_matches(path=OUTPUT_EVENT_MATCHES):
+def load_event_matches(path: str = OUTPUT_EVENT_MATCHES) -> pd.DataFrame:
     df = pd.read_csv(path)
 
-    for col in ["polymarket_time", "news_time"]:
+    for col in ["polymarket_time", "news_time", "event_time"]:
         if col in df.columns:
             df[col] = pd.to_datetime(
                 df[col],
                 utc=True,
                 errors="coerce",
-                format="mixed"
+                format="mixed",
             )
 
     for col in ["match_score", "lead_lag_minutes"]:
@@ -30,7 +32,7 @@ def load_event_matches(path=OUTPUT_EVENT_MATCHES):
     return df
 
 
-def load_seed_index_panel_ts(path=OUTPUT_SEED_INDEX_PANEL_TS):
+def load_seed_index_panel_ts(path: str = OUTPUT_SEED_INDEX_PANEL_TS) -> pd.DataFrame:
     df = pd.read_csv(path)
 
     if "timestamp_utc" in df.columns:
@@ -38,7 +40,7 @@ def load_seed_index_panel_ts(path=OUTPUT_SEED_INDEX_PANEL_TS):
             df["timestamp_utc"],
             utc=True,
             errors="coerce",
-            format="mixed"
+            format="mixed",
         )
 
     numeric_cols = [
@@ -60,39 +62,57 @@ def load_seed_index_panel_ts(path=OUTPUT_SEED_INDEX_PANEL_TS):
     return df
 
 
-def last_row_on_or_before(g, target_ts):
+def last_row_on_or_before(g: pd.DataFrame, target_ts: pd.Timestamp):
     g2 = g[g["timestamp_utc"] <= target_ts]
     if g2.empty:
         return None
     return g2.sort_values("timestamp_utc").iloc[-1]
 
 
-def first_row_on_or_after(g, target_ts):
+def first_row_on_or_after(g: pd.DataFrame, target_ts: pd.Timestamp):
     g2 = g[g["timestamp_utc"] >= target_ts]
     if g2.empty:
         return None
     return g2.sort_values("timestamp_utc").iloc[0]
 
 
-def nth_future_row_after_index(g, current_idx, n_days):
+def nth_future_row_after_index(g: pd.DataFrame, current_idx: int, n_days: int):
     target_idx = current_idx + n_days
     if target_idx >= len(g):
         return None
     return g.iloc[target_idx]
 
 
-def build_timeseries_dataset():
+def resolve_event_time(ev: pd.Series):
+    """
+    Prefer the matcher-produced event_time.
+    Fallbacks:
+      1. news_time
+      2. polymarket_time
+    """
+    event_time = ev.get("event_time")
+
+    if pd.isna(event_time):
+        event_time = ev.get("news_time")
+
+    if pd.isna(event_time):
+        event_time = ev.get("polymarket_time")
+
+    return event_time
+
+
+def build_timeseries_dataset() -> pd.DataFrame:
     event_matches = load_event_matches()
     seed_index_ts = load_seed_index_panel_ts()
 
     if event_matches.empty or seed_index_ts.empty:
         return pd.DataFrame()
 
-    rows = []
+    rows: list[dict] = []
 
     for _, ev in event_matches.iterrows():
         seed_label = ev.get("seed_label")
-        event_time = ev.get("news_time")
+        event_time = resolve_event_time(ev)
 
         if pd.isna(seed_label) or pd.isna(event_time):
             continue
@@ -109,6 +129,7 @@ def build_timeseries_dataset():
 
             if pd.isna(symbol_latest_ts) or pd.isna(symbol_earliest_ts):
                 continue
+
             if event_time < symbol_earliest_ts:
                 continue
             if event_time > symbol_latest_ts:
@@ -162,7 +183,7 @@ def build_timeseries_dataset():
                 has_forward = future_row is not None
                 base[f"has_{horizon}d_forward"] = int(has_forward)
 
-                if not has_forward or pd.isna(t0_close) or t0_close == 0:
+                if (not has_forward) or pd.isna(t0_close) or t0_close == 0:
                     base[f"t{horizon}d_timestamp"] = pd.NaT
                     base[f"t{horizon}d_close"] = np.nan
                     base[f"future_return_{horizon}d"] = np.nan
