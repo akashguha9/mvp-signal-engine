@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.env
+
+# data files (VERY IMPORTANT)
+*.csv
+
+# OS junk
+.DS_Store
+Thumbs.db
