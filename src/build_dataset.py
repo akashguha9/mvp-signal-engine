@@ -18,8 +18,8 @@ STOPWORDS = {
 HIGH_SIGNAL_TERMS = {
     "inflation", "fed", "fomc", "cpi", "jobs", "payrolls", "recession", "gdp",
     "election", "president", "senate", "house", "war", "ukraine", "russia",
-    "china", "tariff", "sanction", "oil", "treasury", "rate", "rates", "default",
-    "debt", "ceasefire", "iran", "israel", "bitcoin", "btc", "ethereum", "eth"
+    "china", "tariff", "sanction", "sanctions", "oil", "treasury", "rate", "rates",
+    "default", "debt", "ceasefire", "iran", "israel", "bitcoin", "btc", "ethereum", "eth"
 }
 
 
@@ -92,8 +92,8 @@ def _safe_read_csv(path: str, columns: list[str] | None = None) -> pd.DataFrame:
                 if c not in df.columns:
                     df[c] = None
         return df
-    except FileNotFoundError:
-        print(f"Missing file: {path}")
+    except (FileNotFoundError, pd.errors.EmptyDataError):
+        print(f"Missing or empty file: {path}")
         return pd.DataFrame(columns=columns or [])
 
 
@@ -102,7 +102,7 @@ def build_prediction_market_join() -> pd.DataFrame:
 
     poly_m = _safe_read_csv(
         "data/processed/polymarket_markets.csv",
-        ["market_id", "question", "category", "end_date"]
+        ["market_id", "question", "category", "end_date", "is_relevant"]
     )
     poly_p = _safe_read_csv(
         "data/processed/polymarket_prices_daily.csv",
@@ -110,7 +110,7 @@ def build_prediction_market_join() -> pd.DataFrame:
     )
     kalshi_m = _safe_read_csv(
         "data/processed/kalshi_markets.csv",
-        ["market_id", "title", "event_ticker", "series_ticker", "close_time"]
+        ["market_id", "title", "event_ticker", "series_ticker", "close_time", "is_relevant"]
     )
     kalshi_p = _safe_read_csv(
         "data/processed/kalshi_prices_daily.csv",
@@ -118,34 +118,42 @@ def build_prediction_market_join() -> pd.DataFrame:
     )
 
     if poly_m.empty or poly_p.empty or kalshi_m.empty or kalshi_p.empty:
-        print("Warning: one or more required market files are empty.")
+        print("Warning: one or more required files are empty.")
         empty = pd.DataFrame(columns=[
-            "Date", "poly_market_id", "kalshi_market_id", "polymarket_prob", "kalshi_prob",
-            "belief_diff", "belief_mean", "poly_question", "kalshi_title", "pair_score"
+            "Date", "poly_market_id", "kalshi_market_id",
+            "polymarket_prob", "kalshi_prob", "belief_diff", "belief_mean",
+            "poly_question", "kalshi_title", "pair_score"
         ])
         save_csv(empty, "data/processed/prediction_markets_daily_joined.csv")
         return empty
 
+    if "is_relevant" in poly_m.columns:
+        poly_m = poly_m[poly_m["is_relevant"].fillna(False) == True].copy()
+    if "is_relevant" in kalshi_m.columns:
+        kalshi_m = kalshi_m[kalshi_m["is_relevant"].fillna(False) == True].copy()
+
     poly_p["Date"] = pd.to_datetime(poly_p["Date"], errors="coerce").dt.floor("D")
     kalshi_p["Date"] = pd.to_datetime(kalshi_p["Date"], errors="coerce").dt.floor("D")
-
     poly_m["end_date"] = pd.to_datetime(poly_m["end_date"], errors="coerce").dt.floor("D")
     kalshi_m["close_time"] = pd.to_datetime(kalshi_m["close_time"], errors="coerce").dt.floor("D")
 
     poly = poly_p.merge(
         poly_m[["market_id", "question", "category", "end_date"]],
         on="market_id",
-        how="left",
+        how="inner",
     )
 
     kalshi = kalshi_p.merge(
         kalshi_m[["market_id", "title", "event_ticker", "series_ticker", "close_time"]],
         on="market_id",
-        how="left",
+        how="inner",
     )
 
     poly_meta = poly[["market_id", "question", "category", "end_date"]].drop_duplicates()
     kal_meta = kalshi[["market_id", "title", "event_ticker", "series_ticker", "close_time"]].drop_duplicates()
+
+    print(f"Relevant Polymarket markets with prices: {len(poly_meta)}")
+    print(f"Relevant Kalshi markets with prices: {len(kal_meta)}")
 
     candidate_pairs = []
 
@@ -176,19 +184,22 @@ def build_prediction_market_join() -> pd.DataFrame:
     pairs = pd.DataFrame(candidate_pairs)
 
     if pairs.empty:
-        print("Warning: no Polymarket/Kalshi market pairs matched.")
+        print("Warning: no matched Polymarket/Kalshi pairs survived scoring.")
         empty = pd.DataFrame(columns=[
-            "Date", "poly_market_id", "kalshi_market_id", "polymarket_prob", "kalshi_prob",
-            "belief_diff", "belief_mean", "poly_question", "kalshi_title", "pair_score"
+            "Date", "poly_market_id", "kalshi_market_id",
+            "polymarket_prob", "kalshi_prob", "belief_diff", "belief_mean",
+            "poly_question", "kalshi_title", "pair_score"
         ])
         save_csv(empty, "data/processed/prediction_markets_daily_joined.csv")
         return empty
 
-    pairs = pairs.sort_values("pair_score", ascending=False).drop_duplicates(
-        subset=["poly_market_id", "kalshi_market_id"]
-    ).head(MAX_MATCHED_PAIRS)
+    pairs = (
+        pairs.sort_values("pair_score", ascending=False)
+        .drop_duplicates(subset=["poly_market_id", "kalshi_market_id"])
+        .head(MAX_MATCHED_PAIRS)
+    )
 
-    print_stage("Matched market pairs", len(pairs))
+    print(f"Matched market pairs kept: {len(pairs)}")
 
     joined = pairs.merge(
         poly[["market_id", "Date", "polymarket_prob"]].rename(columns={"market_id": "poly_market_id"}),
@@ -201,7 +212,7 @@ def build_prediction_market_join() -> pd.DataFrame:
     )
 
     if joined.empty:
-        print("Warning: matched pairs exist, but no date overlap in daily prices.")
+        print("Warning: matched pairs found, but no overlapping dates.")
         save_csv(joined, "data/processed/prediction_markets_daily_joined.csv")
         return joined
 
@@ -210,7 +221,7 @@ def build_prediction_market_join() -> pd.DataFrame:
 
     joined = joined.sort_values(["Date", "pair_score"], ascending=[True, False])
     save_csv(joined, "data/processed/prediction_markets_daily_joined.csv")
-    print_stage("Prediction market join complete", len(joined))
+    print(f"Prediction market joined rows: {len(joined)}")
     return joined
 
 
@@ -247,7 +258,7 @@ def build_final_dataset() -> None:
         out["pair_score"] = None
         out["event_type"] = None
         save_csv(out, "data/processed/final_dataset.csv")
-        print("Final dataset created with prices only because joined belief dataset is empty.")
+        print("Final dataset written as prices-only panel because joined belief data is empty.")
         return
 
     joined["Date"] = pd.to_datetime(joined["Date"], errors="coerce").dt.floor("D")
@@ -257,4 +268,8 @@ def build_final_dataset() -> None:
     final_df = final_df.sort_values(["Date", "pair_score", "symbol"], ascending=[True, False, True])
 
     save_csv(final_df, "data/processed/final_dataset.csv")
-    print_stage("Final dataset complete", len(final_df))
+    print(f"Final dataset rows: {len(final_df)}")
+
+
+if __name__ == "__main__":
+    build_final_dataset()

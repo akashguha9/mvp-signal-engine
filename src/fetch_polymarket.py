@@ -4,6 +4,14 @@ from config import POLY_GAMMA_BASE, POLY_CLOB_BASE, MAX_POLYMARKETS, START_DATE,
 from utils import save_csv, safe_get, to_unix_ts, safe_json_loads, safe_float, print_stage
 
 
+RELEVANT_TERMS = {
+    "inflation", "fed", "fomc", "cpi", "jobs", "payrolls", "recession", "gdp",
+    "election", "president", "senate", "house", "war", "ukraine", "russia",
+    "china", "tariff", "sanction", "sanctions", "oil", "treasury", "rate", "rates",
+    "default", "debt", "ceasefire", "iran", "israel", "bitcoin", "btc", "ethereum", "eth"
+}
+
+
 def _extract_market_list(payload) -> list[dict]:
     if isinstance(payload, list):
         return payload
@@ -15,42 +23,13 @@ def _extract_market_list(payload) -> list[dict]:
     return []
 
 
-def fetch_polymarket_markets(limit: int = MAX_POLYMARKETS) -> pd.DataFrame:
-    print_stage("Fetching Polymarket market metadata")
-    url = f"{POLY_GAMMA_BASE}/markets"
+def _norm(text: str) -> str:
+    return (text or "").lower().strip()
 
-    try:
-        payload = safe_get(url, params={"limit": limit})
-    except Exception as e:
-        print(f"Polymarket metadata fetch failed: {e}")
-        df = pd.DataFrame()
-        save_csv(df, "data/processed/polymarket_markets.csv")
-        return df
 
-    markets = _extract_market_list(payload)
-    rows = []
-
-    for m in markets:
-        rows.append({
-            "market_id": m.get("id"),
-            "question": m.get("question"),
-            "description": m.get("description"),
-            "category": m.get("category"),
-            "active": m.get("active"),
-            "closed": m.get("closed"),
-            "end_date": m.get("endDate"),
-            "slug": m.get("slug"),
-            "outcomes": m.get("outcomes"),
-            "condition_id": m.get("conditionId"),
-            "clob_token_ids": m.get("clobTokenIds"),
-        })
-
-    df = pd.DataFrame(rows)
-    if not df.empty:
-        df["end_date"] = pd.to_datetime(df["end_date"], errors="coerce")
-    save_csv(df, "data/processed/polymarket_markets.csv")
-    print_stage("Polymarket market metadata complete", len(df))
-    return df
+def _is_relevant_market(question: str, description: str, category: str) -> bool:
+    text = " ".join([_norm(question), _norm(description), _norm(category)])
+    return any(term in text for term in RELEVANT_TERMS)
 
 
 def _extract_token_ids(raw) -> list[str]:
@@ -75,9 +54,10 @@ def _extract_token_ids(raw) -> list[str]:
 
 def _extract_history_rows(payload) -> list[dict]:
     if isinstance(payload, dict):
-        history = payload.get("history", [])
-        if isinstance(history, list):
-            return history
+        for key in ["history", "data", "pricesHistory", "prices_history"]:
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value
     return []
 
 
@@ -89,7 +69,8 @@ def _parse_history_row(h: dict) -> tuple[pd.Timestamp | None, float | None]:
         ts = h.get("timestamp")
     if price is None:
         price = h.get("price")
-
+    if price is None:
+        price = h.get("y")
     if ts is None or price is None:
         return None, None
 
@@ -99,39 +80,101 @@ def _parse_history_row(h: dict) -> tuple[pd.Timestamp | None, float | None]:
     except Exception:
         return None, None
 
-    price_val = safe_float(price)
-    if price_val is None:
+    prob = safe_float(price)
+    if prob is None:
         return None, None
 
-    if price_val > 1:
-        price_val = price_val / 100.0
+    if prob > 1:
+        prob = prob / 100.0
 
-    return dt, price_val
+    return dt, prob
+
+
+def fetch_polymarket_markets(limit: int = MAX_POLYMARKETS) -> pd.DataFrame:
+    print_stage("Fetching Polymarket market metadata")
+
+    url = f"{POLY_GAMMA_BASE}/markets"
+    try:
+        payload = safe_get(url, params={"limit": limit})
+    except Exception as e:
+        print(f"Polymarket metadata fetch failed: {e}")
+        df = pd.DataFrame(columns=[
+            "market_id", "question", "description", "category", "active", "closed",
+            "end_date", "slug", "outcomes", "condition_id", "clob_token_ids", "is_relevant"
+        ])
+        save_csv(df, "data/processed/polymarket_markets.csv")
+        return df
+
+    markets = _extract_market_list(payload)
+    rows = []
+
+    for m in markets:
+        question = m.get("question")
+        description = m.get("description")
+        category = m.get("category")
+
+        rows.append({
+            "market_id": m.get("id"),
+            "question": question,
+            "description": description,
+            "category": category,
+            "active": m.get("active"),
+            "closed": m.get("closed"),
+            "end_date": m.get("endDate"),
+            "slug": m.get("slug"),
+            "outcomes": m.get("outcomes"),
+            "condition_id": m.get("conditionId"),
+            "clob_token_ids": m.get("clobTokenIds"),
+            "is_relevant": _is_relevant_market(question, description, category),
+        })
+
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df["end_date"] = pd.to_datetime(df["end_date"], errors="coerce")
+    save_csv(df, "data/processed/polymarket_markets.csv")
+
+    total = len(df)
+    relevant = int(df["is_relevant"].fillna(False).sum()) if not df.empty else 0
+    print(f"Polymarket total markets fetched: {total}")
+    print(f"Polymarket relevant markets kept: {relevant}")
+    return df
 
 
 def fetch_polymarket_daily_prices(markets_df: pd.DataFrame) -> None:
-    print_stage("Fetching Polymarket price history")
+    print_stage("Fetching Polymarket daily prices")
+
+    out_cols = ["market_id", "poly_token_id", "Date", "polymarket_prob"]
 
     if markets_df.empty:
-        save_csv(pd.DataFrame(), "data/processed/polymarket_prices_daily.csv")
-        print("Warning: no Polymarket markets available for daily history.")
+        save_csv(pd.DataFrame(columns=out_cols), "data/processed/polymarket_prices_daily.csv")
+        print("No Polymarket metadata available.")
         return
+
+    if "is_relevant" in markets_df.columns:
+        markets_df = markets_df[markets_df["is_relevant"] == True].copy()
 
     start_ts = to_unix_ts(START_DATE)
     end_ts = to_unix_ts(END_DATE)
 
     rows = []
     attempted_markets = 0
+    token_markets = 0
     successful_markets = 0
+    debug_failures = 0
 
     for _, row in markets_df.iterrows():
         market_id = row.get("market_id")
         token_ids = _extract_token_ids(row.get("clob_token_ids"))
 
-        if not market_id or not token_ids:
+        if not market_id:
             continue
 
         attempted_markets += 1
+
+        if not token_ids:
+            continue
+
+        token_markets += 1
         market_had_rows = False
 
         for token_id in token_ids[:2]:
@@ -147,6 +190,15 @@ def fetch_polymarket_daily_prices(markets_df: pd.DataFrame) -> None:
                 )
 
                 history_rows = _extract_history_rows(payload)
+
+                if not history_rows and debug_failures < 3:
+                    print(f"[POLY DEBUG] Empty history for market_id={market_id}, token_id={token_id}")
+                    if isinstance(payload, dict):
+                        print(f"[POLY DEBUG] Payload keys: {list(payload.keys())}")
+                    else:
+                        print(f"[POLY DEBUG] Payload type: {type(payload)}")
+                    debug_failures += 1
+
                 for h in history_rows:
                     dt, prob = _parse_history_row(h)
                     if dt is None or prob is None:
@@ -161,16 +213,25 @@ def fetch_polymarket_daily_prices(markets_df: pd.DataFrame) -> None:
                     market_had_rows = True
 
             except Exception as e:
-                print(f"Polymarket history failed for market_id={market_id}, token_id={token_id}: {e}")
+                if debug_failures < 3:
+                    print(f"[POLY DEBUG] History fetch failed for market_id={market_id}, token_id={token_id}: {e}")
+                    debug_failures += 1
 
         if market_had_rows:
             successful_markets += 1
 
-    df = pd.DataFrame(rows)
+    df = pd.DataFrame(rows, columns=out_cols)
     if not df.empty:
         df = df.sort_values(["market_id", "Date"]).drop_duplicates(["market_id", "Date"])
+
     save_csv(df, "data/processed/polymarket_prices_daily.csv")
 
-    print_stage("Polymarket price history complete", len(df))
-    print(f"Polymarket attempted markets: {attempted_markets}")
-    print(f"Polymarket successful markets: {successful_markets}")
+    print(f"Polymarket relevant markets attempted: {attempted_markets}")
+    print(f"Polymarket markets with token IDs: {token_markets}")
+    print(f"Polymarket markets with successful history: {successful_markets}")
+    print(f"Polymarket daily price rows: {len(df)}")
+
+
+if __name__ == "__main__":
+    markets = fetch_polymarket_markets()
+    fetch_polymarket_daily_prices(markets)
