@@ -1,10 +1,39 @@
+# Python
 __pycache__/
 *.pyc
-.env
+*.pyo
+*.pyd
+.python-version
 
-# data files (VERY IMPORTANT)
-*.csv
+# Virtual envs
+.venv/
+venv/
+env/
 
-# OS junk
+# OS / editor
 .DS_Store
 Thumbs.db
+.vscode/
+.idea/
+
+# Large generated CSV outputs
+output_*.csv
+
+# Generated text reports
+*.txt
+
+# Archives
+*.zip
+*.tar
+*.gz
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Optional artifact folders
+artifacts/
+runs/
+reports/
+
+# Logs
+*.log
