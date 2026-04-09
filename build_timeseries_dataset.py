@@ -14,7 +14,10 @@ from config import (
 
 
 def load_event_matches(path: str = OUTPUT_EVENT_MATCHES) -> pd.DataFrame:
-    df = pd.read_csv(path)
+    try:
+        df = pd.read_csv(path)
+    except (FileNotFoundError, pd.errors.EmptyDataError):
+        return pd.DataFrame()
 
     for col in ["polymarket_time", "news_time", "event_time"]:
         if col in df.columns:
@@ -33,7 +36,10 @@ def load_event_matches(path: str = OUTPUT_EVENT_MATCHES) -> pd.DataFrame:
 
 
 def load_seed_index_panel_ts(path: str = OUTPUT_SEED_INDEX_PANEL_TS) -> pd.DataFrame:
-    df = pd.read_csv(path)
+    try:
+        df = pd.read_csv(path)
+    except (FileNotFoundError, pd.errors.EmptyDataError):
+        return pd.DataFrame()
 
     if "timestamp_utc" in df.columns:
         df["timestamp_utc"] = pd.to_datetime(
@@ -58,8 +64,28 @@ def load_seed_index_panel_ts(path: str = OUTPUT_SEED_INDEX_PANEL_TS) -> pd.DataF
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
     df = df[df["timestamp_utc"].notna()].copy()
-    df = df.sort_values(["seed_label", "symbol", "timestamp_utc"]).reset_index(drop=True)
+
+    sort_cols = [c for c in ["seed_label", "symbol", "timestamp_utc"] if c in df.columns]
+    if sort_cols:
+        df = df.sort_values(sort_cols).reset_index(drop=True)
+
     return df
+
+
+def resolve_event_time(ev: pd.Series):
+    """
+    Prefer event_time from matcher.
+    Fall back to news_time, then polymarket_time.
+    """
+    event_time = ev.get("event_time")
+
+    if pd.isna(event_time):
+        event_time = ev.get("news_time")
+
+    if pd.isna(event_time):
+        event_time = ev.get("polymarket_time")
+
+    return event_time
 
 
 def last_row_on_or_before(g: pd.DataFrame, target_ts: pd.Timestamp):
@@ -83,29 +109,11 @@ def nth_future_row_after_index(g: pd.DataFrame, current_idx: int, n_days: int):
     return g.iloc[target_idx]
 
 
-def resolve_event_time(ev: pd.Series):
-    """
-    Prefer the matcher-produced event_time.
-    Fallbacks:
-      1. news_time
-      2. polymarket_time
-    """
-    event_time = ev.get("event_time")
-
-    if pd.isna(event_time):
-        event_time = ev.get("news_time")
-
-    if pd.isna(event_time):
-        event_time = ev.get("polymarket_time")
-
-    return event_time
-
-
 def build_timeseries_dataset() -> pd.DataFrame:
     event_matches = load_event_matches()
-    seed_index_ts = load_seed_index_panel_ts()
+    seed_ts = load_seed_index_panel_ts()
 
-    if event_matches.empty or seed_index_ts.empty:
+    if event_matches.empty or seed_ts.empty:
         return pd.DataFrame()
 
     rows: list[dict] = []
@@ -117,7 +125,7 @@ def build_timeseries_dataset() -> pd.DataFrame:
         if pd.isna(seed_label) or pd.isna(event_time):
             continue
 
-        mapped = seed_index_ts[seed_index_ts["seed_label"] == seed_label].copy()
+        mapped = seed_ts[seed_ts["seed_label"] == seed_label].copy()
         if mapped.empty:
             continue
 
@@ -132,6 +140,7 @@ def build_timeseries_dataset() -> pd.DataFrame:
 
             if event_time < symbol_earliest_ts:
                 continue
+
             if event_time > symbol_latest_ts:
                 continue
 
@@ -200,6 +209,7 @@ def build_timeseries_dataset() -> pd.DataFrame:
             rows.append(base)
 
     out = pd.DataFrame(rows)
+
     if out.empty:
         return out
 

@@ -1,2 +1,7 @@
 pandas
+numpy
 requests
+yfinance
+tqdm
+python-dotenv
+python-dateutil

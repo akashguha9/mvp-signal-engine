@@ -11,7 +11,7 @@ FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "d7b971pr01qlbg01e9t0d7b971pr01ql
 GDELT_API_KEY = os.getenv("GDELT_API_KEY", "")
 
 
-# ── RAW / INTERMEDIATE OUTPUTS ────────────────────────────────────────────────
+# ── OUTPUT FILES ───────────────────────────────────────────────────────────────
 
 OUTPUT_EVENT_PANEL = "output_event_panel.csv"
 OUTPUT_NEWS_PANEL = "output_news_panel.csv"
@@ -41,14 +41,12 @@ OUTPUT_SIGNALS = "output_signals.csv"
 OUTPUT_BACKTEST_SUMMARY = "output_backtest_summary.csv"
 
 
-# ── MODEL / PIPELINE SETTINGS ────────────────────────────────────────────────
+# ── MODEL / PIPELINE SETTINGS ──────────────────────────────────────────────────
 
 MIN_SIGNAL_MATCH_SCORE = 0.30
-
-# Keep this aligned with build_timeseries_dataset.py
 FUTURE_HORIZON_DAYS = [1, 3, 5]
 
 
-# ── MISC SETTINGS ─────────────────────────────────────────────────────────────
+# ── MISC ───────────────────────────────────────────────────────────────────────
 
 DEFAULT_TIMEZONE = "UTC"

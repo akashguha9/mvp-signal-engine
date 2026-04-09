@@ -80,7 +80,6 @@ SEED_RULES: dict[str, dict] = {
         "force_void_direction": False,
     },
 
-    # More aggressive / easier to trigger
     "macro_spy": {
         "min_score": 0.25,
         "lag_strong": 20,
@@ -103,7 +102,6 @@ SEED_RULES: dict[str, dict] = {
         "force_void_direction": False,
     },
 
-    # Moderate / slightly stricter
     "oil_geopolitics": {
         "min_score": 0.35,
         "lag_strong": 45,
@@ -126,7 +124,6 @@ SEED_RULES: dict[str, dict] = {
         "force_void_direction": False,
     },
 
-    # Conservative / avoid over-trading
     "fx_dxy": {
         "min_score": 0.40,
         "lag_strong": 60,
@@ -555,7 +552,7 @@ def infer_standard_signal(
         if tie >= tiebreak_threshold:
             signal = 1
             reason = "matched_tiebreak_up"
-        elif tie <= -tiebreak_threshold:
+        elif False:
             signal = -1
             reason = "matched_tiebreak_down"
         else:
