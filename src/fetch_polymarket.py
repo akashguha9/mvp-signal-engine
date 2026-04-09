@@ -11,6 +11,10 @@ RELEVANT_TERMS = {
     "default", "debt", "ceasefire", "iran", "israel", "bitcoin", "btc", "ethereum", "eth"
 }
 
+# Polymarket rejects very long windows, so fetch in chunks.
+CHUNK_DAYS = 60
+CHUNK_SECONDS = CHUNK_DAYS * 24 * 3600
+
 
 def _extract_market_list(payload) -> list[dict]:
     if isinstance(payload, list):
@@ -71,6 +75,7 @@ def _parse_history_row(h: dict) -> tuple[pd.Timestamp | None, float | None]:
         price = h.get("price")
     if price is None:
         price = h.get("y")
+
     if ts is None or price is None:
         return None, None
 
@@ -88,6 +93,18 @@ def _parse_history_row(h: dict) -> tuple[pd.Timestamp | None, float | None]:
         prob = prob / 100.0
 
     return dt, prob
+
+
+def _fetch_history_chunk(token_id: str, chunk_start: int, chunk_end: int):
+    return safe_get(
+        f"{POLY_CLOB_BASE}/prices-history",
+        params={
+            "market": token_id,
+            "startTs": chunk_start,
+            "endTs": chunk_end,
+            "interval": "1d",
+        },
+    )
 
 
 def fetch_polymarket_markets(limit: int = MAX_POLYMARKETS) -> pd.DataFrame:
@@ -131,6 +148,7 @@ def fetch_polymarket_markets(limit: int = MAX_POLYMARKETS) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     if not df.empty:
         df["end_date"] = pd.to_datetime(df["end_date"], errors="coerce")
+
     save_csv(df, "data/processed/polymarket_markets.csv")
 
     total = len(df)
@@ -160,6 +178,7 @@ def fetch_polymarket_daily_prices(markets_df: pd.DataFrame) -> None:
     attempted_markets = 0
     token_markets = 0
     successful_markets = 0
+    successful_chunks = 0
     debug_failures = 0
 
     for _, row in markets_df.iterrows():
@@ -177,58 +196,102 @@ def fetch_polymarket_daily_prices(markets_df: pd.DataFrame) -> None:
         token_markets += 1
         market_had_rows = False
 
+        # Usually first 1-2 token IDs are enough for testing/building
         for token_id in token_ids[:2]:
-            try:
-                payload = safe_get(
-                    f"{POLY_CLOB_BASE}/prices-history",
-                    params={
-                        "market": token_id,
-                        "startTs": start_ts,
-                        "endTs": end_ts,
-                        "interval": "1d",
-                    },
-                )
+            current_start = start_ts
 
-                history_rows = _extract_history_rows(payload)
+            while current_start < end_ts:
+                current_end = min(current_start + CHUNK_SECONDS, end_ts)
 
-                if not history_rows and debug_failures < 3:
-                    print(f"[POLY DEBUG] Empty history for market_id={market_id}, token_id={token_id}")
-                    if isinstance(payload, dict):
-                        print(f"[POLY DEBUG] Payload keys: {list(payload.keys())}")
-                    else:
-                        print(f"[POLY DEBUG] Payload type: {type(payload)}")
-                    debug_failures += 1
+                try:
+                    payload = _fetch_history_chunk(token_id, current_start, current_end)
+                    history_rows = _extract_history_rows(payload)
 
-                for h in history_rows:
-                    dt, prob = _parse_history_row(h)
-                    if dt is None or prob is None:
-                        continue
+                    if history_rows:
+                        successful_chunks += 1
 
-                    rows.append({
-                        "market_id": market_id,
-                        "poly_token_id": token_id,
-                        "Date": dt,
-                        "polymarket_prob": prob,
-                    })
-                    market_had_rows = True
+                    if not history_rows and debug_failures < 3:
+                        print(
+                            f"[POLY DEBUG] Empty history | market_id={market_id} | token_id={token_id} | "
+                            f"chunk_start={current_start} | chunk_end={current_end}"
+                        )
+                        if isinstance(payload, dict):
+                            print(f"[POLY DEBUG] Payload keys: {list(payload.keys())}")
+                        else:
+                            print(f"[POLY DEBUG] Payload type: {type(payload)}")
+                        debug_failures += 1
 
-            except Exception as e:
-                if debug_failures < 3:
-                    print(f"[POLY DEBUG] History fetch failed for market_id={market_id}, token_id={token_id}: {e}")
-                    debug_failures += 1
+                    for h in history_rows:
+                        dt, prob = _parse_history_row(h)
+                        if dt is None or prob is None:
+                            continue
+
+                        rows.append({
+                            "market_id": market_id,
+                            "poly_token_id": token_id,
+                            "Date": dt,
+                            "polymarket_prob": prob,
+                        })
+                        market_had_rows = True
+
+                except Exception as e:
+                    msg = str(e)
+                    if debug_failures < 5:
+                        print(
+                            f"[POLY DEBUG] Chunk fetch failed | market_id={market_id} | token_id={token_id} | "
+                            f"chunk_start={current_start} | chunk_end={current_end} | error={msg}"
+                        )
+                        debug_failures += 1
+
+                    # If a chunk is still too large for some edge case, halve it once.
+                    if "interval is too long" in msg.lower():
+                        smaller_end = min(current_start + (CHUNK_SECONDS // 2), end_ts)
+                        if smaller_end > current_start:
+                            try:
+                                payload = _fetch_history_chunk(token_id, current_start, smaller_end)
+                                history_rows = _extract_history_rows(payload)
+
+                                for h in history_rows:
+                                    dt, prob = _parse_history_row(h)
+                                    if dt is None or prob is None:
+                                        continue
+
+                                    rows.append({
+                                        "market_id": market_id,
+                                        "poly_token_id": token_id,
+                                        "Date": dt,
+                                        "polymarket_prob": prob,
+                                    })
+                                    market_had_rows = True
+                            except Exception as inner_e:
+                                if debug_failures < 6:
+                                    print(
+                                        f"[POLY DEBUG] Retry failed | market_id={market_id} | token_id={token_id} | "
+                                        f"error={inner_e}"
+                                    )
+                                    debug_failures += 1
+
+                current_start = current_end
 
         if market_had_rows:
             successful_markets += 1
 
     df = pd.DataFrame(rows, columns=out_cols)
+
     if not df.empty:
-        df = df.sort_values(["market_id", "Date"]).drop_duplicates(["market_id", "Date"])
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.floor("D")
+        df = df.dropna(subset=["Date", "polymarket_prob"])
+        df = (
+            df.sort_values(["market_id", "Date", "poly_token_id"])
+              .drop_duplicates(["market_id", "Date"], keep="first")
+        )
 
     save_csv(df, "data/processed/polymarket_prices_daily.csv")
 
     print(f"Polymarket relevant markets attempted: {attempted_markets}")
     print(f"Polymarket markets with token IDs: {token_markets}")
     print(f"Polymarket markets with successful history: {successful_markets}")
+    print(f"Polymarket successful chunks: {successful_chunks}")
     print(f"Polymarket daily price rows: {len(df)}")
 
 
