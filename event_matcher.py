@@ -1,180 +1,329 @@
 # event_matcher.py
 
-import math
-import pandas as pd
-from difflib import SequenceMatcher
+from __future__ import annotations
 
-from config import OUTPUT_EVENT_MATCHES, OUTPUT_EVENT_PANEL
+import re
+from difflib import SequenceMatcher
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from config import (
+    OUTPUT_EVENT_MATCHES,
+    OUTPUT_KALSHI_EVENTS,
+    OUTPUT_POLYMARKET_EVENTS,
+    OUTPUT_NEWS_DATASET,
+)
 
 
 STOPWORDS = {
-    "the", "a", "an", "of", "in", "on", "at", "to", "for", "by", "and",
-    "or", "is", "are", "be", "will", "with", "from", "as", "that", "this",
-    "it", "its", "their", "his", "her", "than", "into", "over", "under",
-    "up", "down", "more", "less", "before", "after", "between", "about"
+    "the", "a", "an", "of", "to", "for", "in", "on", "at", "by", "with", "from",
+    "and", "or", "is", "are", "be", "will", "would", "could", "should", "has",
+    "have", "had", "after", "before", "into", "over", "under", "about", "new",
+    "latest", "report", "reports", "says", "say", "amid", "as", "that", "this",
 }
 
 
-def norm_text(x):
+def normalize_text(x: object) -> str:
     if pd.isna(x):
         return ""
-    return str(x).strip().lower()
+    s = str(x).lower().strip()
+    s = re.sub(r"http\S+", " ", s)
+    s = re.sub(r"[^a-z0-9\s]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
 
-def text_similarity(a, b):
-    return SequenceMatcher(None, norm_text(a), norm_text(b)).ratio()
+def tokenize(x: object) -> list[str]:
+    s = normalize_text(x)
+    if not s:
+        return []
+    return [tok for tok in s.split() if tok not in STOPWORDS and len(tok) > 1]
 
 
-def tokenize(text):
-    text = norm_text(text)
-    tokens = []
-    for word in text.replace("?", " ").replace(",", " ").replace(".", " ").replace("-", " ").split():
-        word = word.strip()
-        if len(word) > 2 and word not in STOPWORDS:
-            tokens.append(word)
-    return set(tokens)
+def jaccard_score(a: object, b: object) -> float:
+    sa = set(tokenize(a))
+    sb = set(tokenize(b))
+    if not sa or not sb:
+        return 0.0
+    return len(sa & sb) / len(sa | sb)
 
 
-def keyword_overlap(a, b):
-    ta = tokenize(a)
-    tb = tokenize(b)
+def sequence_score(a: object, b: object) -> float:
+    na = normalize_text(a)
+    nb = normalize_text(b)
+    if not na or not nb:
+        return 0.0
+    return SequenceMatcher(None, na, nb).ratio()
 
-    if not ta or not tb:
+
+def date_proximity_score(pm_time: pd.Timestamp, news_time: pd.Timestamp) -> float:
+    pm_time = pd.to_datetime(pm_time, utc=True, errors="coerce")
+    news_time = pd.to_datetime(news_time, utc=True, errors="coerce")
+
+    if pd.isna(pm_time) or pd.isna(news_time):
         return 0.0
 
-    inter = len(ta & tb)
-    union = len(ta | tb)
+    delta_minutes = abs((news_time - pm_time).total_seconds()) / 60.0
 
-    if union == 0:
-        return 0.0
-
-    return inter / union
-
-
-def date_proximity_score(t1, t2, half_life_days=30):
-    """
-    Exponential decay by time distance.
-    1.0 when same timestamp, falls as gap widens.
-    """
-    if pd.isna(t1) or pd.isna(t2):
-        return 0.0
-
-    delta_days = abs((t1 - t2).total_seconds()) / 86400.0
-    return math.exp(-delta_days / half_life_days)
+    if delta_minutes <= 60:
+        return 1.0
+    if delta_minutes <= 6 * 60:
+        return 0.85
+    if delta_minutes <= 24 * 60:
+        return 0.60
+    if delta_minutes <= 3 * 24 * 60:
+        return 0.35
+    if delta_minutes <= 7 * 24 * 60:
+        return 0.15
+    return 0.0
 
 
-def load_event_panel(path=OUTPUT_EVENT_PANEL):
-    df = pd.read_csv(path)
-
-    if "platform" in df.columns:
-        df["platform"] = df["platform"].astype(str).str.strip()
-
-    if "timestamp_utc" in df.columns:
-        df["timestamp_utc"] = pd.to_datetime(
-            df["timestamp_utc"].astype(str).str.strip().replace({"nan": None, "NaT": None}),
-            utc=True,
-            errors="coerce",
-            format="mixed"
-        )
-
-    df = df[df["timestamp_utc"].notna()].copy()
-    return df.sort_values("timestamp_utc").reset_index(drop=True)
-
-
-def split_panel(df):
-    pm = df[df["platform"] == "polymarket_market"].copy()
-    news = df[df["platform"] == "market_news"].copy()
-    return pm, news
-
-
-def weighted_match_score(pm_title, news_title, pm_time, news_time):
-    sim = text_similarity(pm_title, news_title)
-    overlap = keyword_overlap(pm_title, news_title)
+def weighted_match_score(
+    pm_title: object,
+    news_title: object,
+    pm_time: pd.Timestamp,
+    news_time: pd.Timestamp,
+) -> float:
+    jac = jaccard_score(pm_title, news_title)
+    seq = sequence_score(pm_title, news_title)
     prox = date_proximity_score(pm_time, news_time)
-
-    score = 0.5 * sim + 0.3 * overlap + 0.2 * prox
-
-    return {
-        "text_similarity": round(sim, 4),
-        "keyword_overlap": round(overlap, 4),
-        "date_proximity": round(prox, 4),
-        "weighted_score": round(score, 4),
-    }
+    score = 0.45 * jac + 0.35 * seq + 0.20 * prox
+    return float(round(score, 6))
 
 
-def match_polymarket_to_news(pm_df, news_df, min_score=0.15):
-    rows = []
+def _safe_read_csv(path: str | Path) -> pd.DataFrame:
+    path = Path(path)
+    if not path.exists():
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path)
+    except Exception:
+        return pd.DataFrame()
 
-    for _, pm_row in pm_df.iterrows():
-        pm_title = pm_row.get("headline") or pm_row.get("market_title") or ""
-        pm_time = pm_row.get("timestamp_utc")
 
-        best = None
-        best_score = -1.0
+def load_event_sources() -> pd.DataFrame:
+    pm = _safe_read_csv(OUTPUT_POLYMARKET_EVENTS)
+    ka = _safe_read_csv(OUTPUT_KALSHI_EVENTS)
 
-        for _, news_row in news_df.iterrows():
-            news_title = news_row.get("headline") or ""
-            news_time = news_row.get("timestamp_utc")
+    frames: list[pd.DataFrame] = []
 
-            scores = weighted_match_score(pm_title, news_title, pm_time, news_time)
+    if not pm.empty:
+        pm = pm.copy()
+        if "title" in pm.columns and "polymarket_title" not in pm.columns:
+            pm["polymarket_title"] = pm["title"]
+        if "timestamp" in pm.columns and "polymarket_time" not in pm.columns:
+            pm["polymarket_time"] = pm["timestamp"]
+        if "source" not in pm.columns:
+            pm["source"] = "polymarket"
+        frames.append(pm)
 
-            if scores["weighted_score"] > best_score:
-                best_score = scores["weighted_score"]
-                best = {
-                    "news_title": news_title,
-                    "news_time": news_time,
-                    **scores
-                }
+    if not ka.empty:
+        ka = ka.copy()
+        if "title" in ka.columns and "polymarket_title" not in ka.columns:
+            ka["polymarket_title"] = ka["title"]
+        if "timestamp" in ka.columns and "polymarket_time" not in ka.columns:
+            ka["polymarket_time"] = ka["timestamp"]
+        if "source" not in ka.columns:
+            ka["source"] = "kalshi"
+        frames.append(ka)
 
-        if best is not None and best["weighted_score"] >= min_score:
-            delta_minutes = (pm_time - best["news_time"]).total_seconds() / 60.0
+    if not frames:
+        return pd.DataFrame()
 
-            if delta_minutes > 0:
-                leader = "news_led"
-            elif delta_minutes < 0:
-                leader = "polymarket_led"
+    df = pd.concat(frames, ignore_index=True, sort=False)
+
+    if "seed_label" not in df.columns:
+        df["seed_label"] = np.nan
+    if "polymarket_title" not in df.columns:
+        df["polymarket_title"] = np.nan
+    if "polymarket_time" not in df.columns:
+        df["polymarket_time"] = np.nan
+    if "leader" not in df.columns:
+        df["leader"] = np.nan
+
+    df["polymarket_time"] = pd.to_datetime(df["polymarket_time"], utc=True, errors="coerce")
+    return df
+
+
+def load_news() -> pd.DataFrame:
+    news = _safe_read_csv(OUTPUT_NEWS_DATASET)
+    if news.empty:
+        return news
+
+    news = news.copy()
+
+    if "title" in news.columns and "news_title" not in news.columns:
+        news["news_title"] = news["title"]
+
+    if "timestamp_utc" in news.columns and "news_time" not in news.columns:
+        news["news_time"] = news["timestamp_utc"]
+    elif "published_at" in news.columns and "news_time" not in news.columns:
+        news["news_time"] = news["published_at"]
+    elif "timestamp" in news.columns and "news_time" not in news.columns:
+        news["news_time"] = news["timestamp"]
+
+    if "news_title" not in news.columns:
+        news["news_title"] = np.nan
+    if "news_time" not in news.columns:
+        news["news_time"] = np.nan
+
+    news["news_time"] = pd.to_datetime(news["news_time"], utc=True, errors="coerce")
+    return news
+
+
+def best_news_match_for_event(
+    pm_title: object,
+    pm_time: pd.Timestamp,
+    news_df: pd.DataFrame,
+    min_match_score: float = 0.15,
+) -> dict | None:
+    """
+    Strict match window:
+    - news must be within [pm_time - 7 days, pm_time + 2 days]
+    - no fallback to full dataset
+    - reject weak matches
+    """
+    pm_time = pd.to_datetime(pm_time, utc=True, errors="coerce")
+    if pd.isna(pm_time) or news_df.empty:
+        return None
+
+    candidates = news_df[
+        (news_df["news_time"].notna()) &
+        (news_df["news_time"] >= pm_time - pd.Timedelta(days=7)) &
+        (news_df["news_time"] <= pm_time + pd.Timedelta(days=2))
+    ].copy()
+
+    if candidates.empty:
+        return None
+
+    candidates["match_score"] = candidates.apply(
+        lambda r: weighted_match_score(pm_title, r.get("news_title"), pm_time, r.get("news_time")),
+        axis=1,
+    )
+
+    candidates = candidates.sort_values(
+        ["match_score", "news_time"],
+        ascending=[False, True],
+    ).reset_index(drop=True)
+
+    if candidates.empty:
+        return None
+
+    best = candidates.iloc[0].to_dict()
+
+    if float(best.get("match_score", 0.0)) < min_match_score:
+        return None
+
+    return best
+
+
+def build_event_matches(
+    events_df: pd.DataFrame,
+    news_df: pd.DataFrame,
+    lag_cap_minutes: float = 10080.0,
+) -> pd.DataFrame:
+    """
+    lead_lag_minutes convention:
+      news_time - polymarket_time
+      positive => news after event
+      negative => news before event
+    """
+    if events_df.empty:
+        return pd.DataFrame()
+
+    rows: list[dict] = []
+
+    for _, ev in events_df.iterrows():
+        pm_title = ev.get("polymarket_title")
+        pm_time = pd.to_datetime(ev.get("polymarket_time"), utc=True, errors="coerce")
+
+        best = best_news_match_for_event(pm_title, pm_time, news_df)
+
+        match_score = np.nan
+        news_title = np.nan
+        news_time = pd.NaT
+        lead_lag_minutes = np.nan
+
+        if best is not None:
+            news_title = best.get("news_title")
+            news_time = pd.to_datetime(best.get("news_time"), utc=True, errors="coerce")
+            match_score = best.get("match_score", np.nan)
+
+            if pd.isna(pm_time) or pd.isna(news_time):
+                lead_lag_minutes = np.nan
             else:
-                leader = "simultaneous"
+                lead_lag_minutes = (news_time - pm_time).total_seconds() / 60.0
 
-            rows.append({
-                "seed_label": pm_row.get("seed_label"),
-                "polymarket_ref": pm_row.get("market_ref"),
+                if abs(lead_lag_minutes) > lag_cap_minutes:
+                    lead_lag_minutes = np.nan
+
+        rows.append(
+            {
+                "seed_label": ev.get("seed_label"),
+                "symbol": ev.get("symbol"),
+                "country": ev.get("country"),
+                "bucket": ev.get("bucket"),
+                "leader": ev.get("leader"),
+                "source": ev.get("source"),
                 "polymarket_title": pm_title,
+                "news_title": news_title,
                 "polymarket_time": pm_time,
-                "news_title": best["news_title"],
-                "news_time": best["news_time"],
-                "text_similarity": best["text_similarity"],
-                "keyword_overlap": best["keyword_overlap"],
-                "date_proximity": best["date_proximity"],
-                "match_score": best["weighted_score"],
-                "lead_lag_minutes": delta_minutes,
-                "leader": leader,
-            })
+                "news_time": news_time,
+                "event_time": news_time if pd.notna(news_time) else pm_time,
+                "match_score": match_score,
+                "lead_lag_minutes": lead_lag_minutes,
+            }
+        )
 
     out = pd.DataFrame(rows)
 
-    if out.empty:
-        return out
+    sort_cols = [c for c in ["seed_label", "event_time", "symbol"] if c in out.columns]
+    if sort_cols:
+        out = out.sort_values(sort_cols).reset_index(drop=True)
 
-    return out.sort_values(
-        ["match_score", "seed_label", "polymarket_time"],
-        ascending=[False, True, True]
-    ).reset_index(drop=True)
+    return out
+
+
+def main() -> None:
+    events_df = load_event_sources()
+    news_df = load_news()
+
+    if events_df.empty:
+        print("No event source rows found.")
+        pd.DataFrame().to_csv(OUTPUT_EVENT_MATCHES, index=False)
+        print(f"Saved empty file: {OUTPUT_EVENT_MATCHES}")
+        return
+
+    if news_df.empty:
+        print("No news rows found.")
+        out = events_df.copy()
+        out["news_title"] = np.nan
+        out["news_time"] = pd.NaT
+        out["event_time"] = out["polymarket_time"]
+        out["match_score"] = np.nan
+        out["lead_lag_minutes"] = np.nan
+        out.to_csv(OUTPUT_EVENT_MATCHES, index=False)
+        print(f"Saved fallback file: {OUTPUT_EVENT_MATCHES}")
+        return
+
+    out = build_event_matches(events_df, news_df, lag_cap_minutes=10080.0)
+    out.to_csv(OUTPUT_EVENT_MATCHES, index=False)
+
+    print("Event matching complete.")
+    print(f"Rows: {len(out)}")
+
+    if "match_score" in out.columns:
+        print("\nMatch score summary:")
+        print(out["match_score"].describe().to_string())
+
+    if "lead_lag_minutes" in out.columns:
+        print("\nLead/lag summary:")
+        print(out["lead_lag_minutes"].describe().to_string())
+
+    print(f"\nSaved: {OUTPUT_EVENT_MATCHES}")
 
 
 if __name__ == "__main__":
-    df = load_event_panel()
-    pm_df, news_df = split_panel(df)
-
-    print(f"Polymarket rows: {len(pm_df)}")
-    print(f"News rows: {len(news_df)}")
-
-    matched_df = match_polymarket_to_news(pm_df, news_df, min_score=0.15)
-
-    if matched_df.empty:
-        print("\nNo usable event matches found.")
-    else:
-        print("\nMatched event rows:")
-        print(matched_df.head(20).to_string(index=False))
-        matched_df.to_csv(OUTPUT_EVENT_MATCHES, index=False)
-        print(f"\nSaved: {OUTPUT_EVENT_MATCHES}")
+    main()
