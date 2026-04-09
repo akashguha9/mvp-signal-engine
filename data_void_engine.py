@@ -69,17 +69,109 @@ REGIME_PRIORS: dict[str, int] = {
 }
 
 
+# ── SEED-SPECIFIC RULES ───────────────────────────────────────────────────────
+
+SEED_RULES: dict[str, dict] = {
+    "DEFAULT": {
+        "min_score": 0.30,
+        "lag_strong": 30,
+        "use_tiebreak": True,
+        "tiebreak_threshold": 1,
+        "force_void_direction": False,
+    },
+
+    # More aggressive / easier to trigger
+    "macro_spy": {
+        "min_score": 0.25,
+        "lag_strong": 20,
+        "use_tiebreak": True,
+        "tiebreak_threshold": 1,
+        "force_void_direction": False,
+    },
+    "spy": {
+        "min_score": 0.25,
+        "lag_strong": 20,
+        "use_tiebreak": True,
+        "tiebreak_threshold": 1,
+        "force_void_direction": False,
+    },
+    "qqq": {
+        "min_score": 0.25,
+        "lag_strong": 20,
+        "use_tiebreak": True,
+        "tiebreak_threshold": 1,
+        "force_void_direction": False,
+    },
+
+    # Moderate / slightly stricter
+    "oil_geopolitics": {
+        "min_score": 0.35,
+        "lag_strong": 45,
+        "use_tiebreak": True,
+        "tiebreak_threshold": 2,
+        "force_void_direction": False,
+    },
+    "gld": {
+        "min_score": 0.32,
+        "lag_strong": 40,
+        "use_tiebreak": True,
+        "tiebreak_threshold": 2,
+        "force_void_direction": False,
+    },
+    "tlt": {
+        "min_score": 0.32,
+        "lag_strong": 40,
+        "use_tiebreak": True,
+        "tiebreak_threshold": 2,
+        "force_void_direction": False,
+    },
+
+    # Conservative / avoid over-trading
+    "fx_dxy": {
+        "min_score": 0.40,
+        "lag_strong": 60,
+        "use_tiebreak": False,
+        "tiebreak_threshold": 2,
+        "force_void_direction": False,
+    },
+    "dxy": {
+        "min_score": 0.40,
+        "lag_strong": 60,
+        "use_tiebreak": False,
+        "tiebreak_threshold": 2,
+        "force_void_direction": False,
+    },
+    "vxx": {
+        "min_score": 0.40,
+        "lag_strong": 60,
+        "use_tiebreak": False,
+        "tiebreak_threshold": 2,
+        "force_void_direction": False,
+    },
+}
+
+
+def get_seed_rule(row: pd.Series) -> dict:
+    seed = str(row.get("seed_label", "")).strip().lower()
+
+    if not seed:
+        return SEED_RULES["DEFAULT"]
+
+    if seed in SEED_RULES:
+        return SEED_RULES[seed]
+
+    for key, rule in SEED_RULES.items():
+        if key == "DEFAULT":
+            continue
+        if key in seed:
+            return rule
+
+    return SEED_RULES["DEFAULT"]
+
+
 # ── DATA VOID DETECTION ────────────────────────────────────────────────────────
 
 def detect_data_void(row: pd.Series, min_score: float = 0.3) -> tuple[bool, list[str]]:
-    """
-    Returns (is_void, reasons).
-
-    DATA VOID when:
-      - score is NaN or below threshold
-      - lag is NaN
-      - all forward returns are missing
-    """
     reasons: list[str] = []
 
     score = row.get("match_score")
@@ -430,10 +522,13 @@ def infer_standard_signal(
     row: pd.Series,
     min_score: float = 0.3,
 ) -> tuple[int, str]:
-    """
-    Standard path for rows that are not in DATA VOID.
-    Adds tie-break logic so matched rows do not default to neutral too easily.
-    """
+    rule = get_seed_rule(row)
+
+    min_score = float(rule["min_score"])
+    lag_strong = float(rule["lag_strong"])
+    use_tiebreak = bool(rule["use_tiebreak"])
+    tiebreak_threshold = int(rule["tiebreak_threshold"])
+
     score = row.get("match_score")
     lag = row.get("lead_lag_minutes")
     vol = row.get("t0_volatility_20d")
@@ -443,13 +538,13 @@ def infer_standard_signal(
     signal = 0
     reason = "no_signal"
 
-    if score >= min_score and lag > 30:
+    if score >= min_score and lag > lag_strong:
         signal = 1
         reason = "news_led"
-    elif score >= min_score and lag < -30:
+    elif score >= min_score and lag < -lag_strong:
         signal = -1
         reason = "market_led"
-    elif score >= min_score:
+    elif score >= min_score and use_tiebreak:
         tie = 0
 
         if pd.notna(trend):
@@ -457,10 +552,10 @@ def infer_standard_signal(
         if pd.notna(mom20):
             tie += int(np.sign(mom20))
 
-        if tie > 0:
+        if tie >= tiebreak_threshold:
             signal = 1
             reason = "matched_tiebreak_up"
-        elif tie < 0:
+        elif tie <= -tiebreak_threshold:
             signal = -1
             reason = "matched_tiebreak_down"
         else:
@@ -493,15 +588,20 @@ def infer_signal_with_void_fallback(
     min_score: float = 0.3,
     force_direction: bool = False,
 ) -> tuple[int, str]:
-    is_void, _ = detect_data_void(row, min_score=min_score)
+    rule = get_seed_rule(row)
+
+    seed_min_score = float(rule["min_score"])
+    seed_force_void_direction = bool(rule["force_void_direction"])
+
+    is_void, _ = detect_data_void(row, min_score=seed_min_score)
 
     if not is_void:
-        return infer_standard_signal(row=row, min_score=min_score)
+        return infer_standard_signal(row=row, min_score=seed_min_score)
 
     result = infer_from_void(
         row=row,
         df_history=df_history,
-        force_direction=force_direction,
+        force_direction=(force_direction or seed_force_void_direction),
     )
     return int(result["signal"]), str(result["reason"])
 
@@ -542,7 +642,7 @@ if __name__ == "__main__":
         "seed_label": "macro_spy",
     })
 
-    is_void, reasons = detect_data_void(row_void)
+    is_void, reasons = detect_data_void(row_void, min_score=get_seed_rule(row_void)["min_score"])
     print(f"Test 1 — Complete void: {is_void} | Reasons: {reasons}")
     result = infer_from_void(row_void)
     print(format_void_report(result))
@@ -561,8 +661,8 @@ if __name__ == "__main__":
         "reason": "war_escalation",
     })
 
-    is_void, reasons = detect_data_void(row_low)
-    print(f"Test 2 — Low score void: {is_void} | Reasons: {reasons}")
+    is_void2, reasons2 = detect_data_void(row_low, min_score=get_seed_rule(row_low)["min_score"])
+    print(f"Test 2 — Low score void: {is_void2} | Reasons: {reasons2}")
     result2 = infer_from_void(row_low)
     print(format_void_report(result2))
     signal2, reason2 = infer_signal_with_void_fallback(row_low)
@@ -579,7 +679,7 @@ if __name__ == "__main__":
         "seed_label": "macro_spy",
     })
 
-    is_void3, reasons3 = detect_data_void(row_good_up)
+    is_void3, reasons3 = detect_data_void(row_good_up, min_score=get_seed_rule(row_good_up)["min_score"])
     signal3, reason3 = infer_signal_with_void_fallback(row_good_up)
     print(f"Test 3 — Good data (no void): is_void={is_void3} | Reasons: {reasons3}")
     print(f"  → signal={signal3}, reason={reason3}\n")
@@ -595,9 +695,25 @@ if __name__ == "__main__":
         "seed_label": "macro_spy",
     })
 
-    is_void4, reasons4 = detect_data_void(row_good_tiebreak)
+    is_void4, reasons4 = detect_data_void(row_good_tiebreak, min_score=get_seed_rule(row_good_tiebreak)["min_score"])
     signal4, reason4 = infer_signal_with_void_fallback(row_good_tiebreak)
     print(f"Test 4 — Good matched tie-break row: is_void={is_void4} | Reasons: {reasons4}")
-    print(f"  → signal={signal4}, reason={reason4}")
+    print(f"  → signal={signal4}, reason={reason4}\n")
+
+    row_conservative = pd.Series({
+        "match_score": 0.34,
+        "lead_lag_minutes": 20.0,
+        "t0_volatility_20d": 0.030,
+        "t0_momentum_20d": 0.02,
+        "t0_momentum_60d": 0.01,
+        "t0_trend_50_200": 0.003,
+        "t0_drawdown": -0.01,
+        "seed_label": "dxy",
+    })
+
+    is_void5, reasons5 = detect_data_void(row_conservative, min_score=get_seed_rule(row_conservative)["min_score"])
+    signal5, reason5 = infer_signal_with_void_fallback(row_conservative)
+    print(f"Test 5 — Conservative seed row: is_void={is_void5} | Reasons: {reasons5}")
+    print(f"  → signal={signal5}, reason={reason5}")
 
     print("\n✓ Self-test complete.")
