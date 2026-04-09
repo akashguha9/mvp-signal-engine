@@ -7,9 +7,6 @@ Integrates with signal_engine.py's infer_signal() as a drop-in upgrade.
 When D_t = ∅ OR |D_t| < k:
     Signal_t = α·Historical + β·Proxy + γ·Narrative + δ·Simulation + ε·Prior
     α + β + γ + δ + ε = 1
-
-Pipeline position:
-S0 SENSE layer -> fires before signal_engine.py returns "no_signal"
 """
 
 from __future__ import annotations
@@ -106,15 +103,6 @@ def detect_data_void(row: pd.Series, min_score: float = 0.3) -> tuple[bool, list
 # ── LAYER 1: HISTORICAL ANALOGUE ──────────────────────────────────────────────
 
 def layer1_historical(row: pd.Series, df_history: Optional[pd.DataFrame]) -> tuple[float, float]:
-    """
-    Search historical rows for analogues on:
-      - same seed_label
-      - similar regime (same trend sign)
-      - similar volatility quartile
-
-    Returns:
-      (direction_score, confidence), where direction_score ∈ [-1, +1]
-    """
     if df_history is None or df_history.empty:
         return 0.0, 0.0
 
@@ -164,9 +152,6 @@ def layer1_historical(row: pd.Series, df_history: Optional[pd.DataFrame]) -> tup
 # ── LAYER 2: CROSS-ASSET PROXY ────────────────────────────────────────────────
 
 def layer2_proxy(row: pd.Series) -> tuple[float, float]:
-    """
-    Use row-level momentum / trend fields as proxy signals.
-    """
     signals: list[float] = []
 
     mom20 = row.get("t0_momentum_20d")
@@ -195,12 +180,6 @@ def layer2_proxy(row: pd.Series) -> tuple[float, float]:
 # ── LAYER 3: NARRATIVE CONTINUATION ───────────────────────────────────────────
 
 def layer3_narrative(row: pd.Series) -> tuple[float, float]:
-    """
-    Narrative inertia proxy:
-      N_{t+1} = N_t + Δsentiment
-
-    Uses drawdown, momentum, trend.
-    """
     drawdown = row.get("t0_drawdown")
     mom20 = row.get("t0_momentum_20d")
     trend = row.get("t0_trend_50_200")
@@ -239,9 +218,6 @@ def layer3_narrative(row: pd.Series) -> tuple[float, float]:
 # ── LAYER 4: PROBABILISTIC SIMULATION ─────────────────────────────────────────
 
 def layer4_simulation(row: pd.Series, n_scenarios: int = 500) -> tuple[float, float]:
-    """
-    Monte Carlo over plausible returns using volatility, momentum, trend.
-    """
     vol = row.get("t0_volatility_20d", 0.02)
     mom20 = row.get("t0_momentum_20d", 0.0)
     trend = row.get("t0_trend_50_200", 0.0)
@@ -275,9 +251,6 @@ def layer4_simulation(row: pd.Series, n_scenarios: int = 500) -> tuple[float, fl
 # ── LAYER 5: STRUCTURAL PRIOR ─────────────────────────────────────────────────
 
 def layer5_prior(row: pd.Series) -> tuple[float, float]:
-    """
-    Apply macro causality chains via seed_label / reason / regime.
-    """
     seed = str(row.get("seed_label", "")).lower().replace(" ", "_")
     label = str(row.get("reason", "")).lower().replace(" ", "_")
 
@@ -318,10 +291,6 @@ def allocate_weights(
     l4_conf: float,
     l5_conf: float,
 ) -> tuple[float, float, float, float, float]:
-    """
-    Signal_t = α·L1 + β·L2 + γ·L3 + δ·L4 + ε·L5
-    Weights proportional to confidence and sum to 1.
-    """
     raw = np.array([l1_conf, l2_conf, l3_conf, l4_conf, l5_conf], dtype=float)
     total = raw.sum()
 
@@ -340,9 +309,6 @@ def infer_from_void(
     min_confidence_threshold: float = 0.15,
     force_direction: bool = False,
 ) -> dict:
-    """
-    Returns structured output for a void row.
-    """
     l1_dir, l1_conf = layer1_historical(row, df_history)
     l2_dir, l2_conf = layer2_proxy(row)
     l3_dir, l3_conf = layer3_narrative(row)
@@ -458,6 +424,67 @@ def infer_from_void(
     }
 
 
+# ── STANDARD NON-VOID INFERENCE ───────────────────────────────────────────────
+
+def infer_standard_signal(
+    row: pd.Series,
+    min_score: float = 0.3,
+) -> tuple[int, str]:
+    """
+    Standard path for rows that are not in DATA VOID.
+    Adds tie-break logic so matched rows do not default to neutral too easily.
+    """
+    score = row.get("match_score")
+    lag = row.get("lead_lag_minutes")
+    vol = row.get("t0_volatility_20d")
+    trend = row.get("t0_trend_50_200")
+    mom20 = row.get("t0_momentum_20d")
+
+    signal = 0
+    reason = "no_signal"
+
+    if score >= min_score and lag > 30:
+        signal = 1
+        reason = "news_led"
+    elif score >= min_score and lag < -30:
+        signal = -1
+        reason = "market_led"
+    elif score >= min_score:
+        tie = 0
+
+        if pd.notna(trend):
+            tie += int(np.sign(trend))
+        if pd.notna(mom20):
+            tie += int(np.sign(mom20))
+
+        if tie > 0:
+            signal = 1
+            reason = "matched_tiebreak_up"
+        elif tie < 0:
+            signal = -1
+            reason = "matched_tiebreak_down"
+        else:
+            signal = 0
+            reason = "matched_neutral"
+
+    if pd.notna(vol) and vol > 0.04:
+        reason += "_high_vol"
+
+    if pd.notna(trend):
+        if trend > 0:
+            reason += "_uptrend"
+        elif trend < 0:
+            reason += "_downtrend"
+
+    if pd.notna(mom20):
+        if mom20 > 0:
+            reason += "_mom_up"
+        elif mom20 < 0:
+            reason += "_mom_down"
+
+    return int(signal), reason
+
+
 # ── DROP-IN REPLACEMENT FOR signal_engine.infer_signal() ──────────────────────
 
 def infer_signal_with_void_fallback(
@@ -466,47 +493,10 @@ def infer_signal_with_void_fallback(
     min_score: float = 0.3,
     force_direction: bool = False,
 ) -> tuple[int, str]:
-    """
-    Drop-in replacement for signal_engine.infer_signal().
-
-    Returns:
-      (signal, reason)
-    """
     is_void, _ = detect_data_void(row, min_score=min_score)
 
     if not is_void:
-        score = row.get("match_score")
-        lag = row.get("lead_lag_minutes")
-        vol = row.get("t0_volatility_20d")
-        trend = row.get("t0_trend_50_200")
-        mom20 = row.get("t0_momentum_20d")
-
-        signal = 0
-        reason = "no_signal"
-
-        if score >= min_score and lag > 0:
-            signal = 1
-            reason = "news_led"
-        elif score >= min_score and lag < 0:
-            signal = -1
-            reason = "market_led"
-
-        if pd.notna(vol) and vol > 0.04:
-            reason += "_high_vol"
-
-        if pd.notna(trend):
-            if trend > 0:
-                reason += "_uptrend"
-            elif trend < 0:
-                reason += "_downtrend"
-
-        if pd.notna(mom20):
-            if mom20 > 0:
-                reason += "_mom_up"
-            elif mom20 < 0:
-                reason += "_mom_down"
-
-        return int(signal), reason
+        return infer_standard_signal(row=row, min_score=min_score)
 
     result = infer_from_void(
         row=row,
@@ -578,9 +568,9 @@ if __name__ == "__main__":
     signal2, reason2 = infer_signal_with_void_fallback(row_low)
     print(f"  → infer_signal_with_void_fallback: signal={signal2}, reason={reason2}\n")
 
-    row_good = pd.Series({
+    row_good_up = pd.Series({
         "match_score": 0.75,
-        "lead_lag_minutes": 30.0,
+        "lead_lag_minutes": 45.0,
         "t0_volatility_20d": 0.018,
         "t0_momentum_20d": 0.04,
         "t0_momentum_60d": 0.06,
@@ -589,9 +579,25 @@ if __name__ == "__main__":
         "seed_label": "macro_spy",
     })
 
-    is_void3, reasons3 = detect_data_void(row_good)
-    signal3, reason3 = infer_signal_with_void_fallback(row_good)
+    is_void3, reasons3 = detect_data_void(row_good_up)
+    signal3, reason3 = infer_signal_with_void_fallback(row_good_up)
     print(f"Test 3 — Good data (no void): is_void={is_void3} | Reasons: {reasons3}")
-    print(f"  → signal={signal3}, reason={reason3}")
+    print(f"  → signal={signal3}, reason={reason3}\n")
+
+    row_good_tiebreak = pd.Series({
+        "match_score": 0.62,
+        "lead_lag_minutes": 5.0,
+        "t0_volatility_20d": 0.012,
+        "t0_momentum_20d": 0.03,
+        "t0_momentum_60d": 0.02,
+        "t0_trend_50_200": 0.004,
+        "t0_drawdown": -0.02,
+        "seed_label": "macro_spy",
+    })
+
+    is_void4, reasons4 = detect_data_void(row_good_tiebreak)
+    signal4, reason4 = infer_signal_with_void_fallback(row_good_tiebreak)
+    print(f"Test 4 — Good matched tie-break row: is_void={is_void4} | Reasons: {reasons4}")
+    print(f"  → signal={signal4}, reason={reason4}")
 
     print("\n✓ Self-test complete.")
