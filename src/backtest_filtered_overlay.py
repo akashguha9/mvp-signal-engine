@@ -13,7 +13,7 @@ def main() -> None:
     filtered = df[
         (df["direction"] == 1) &
         (df["symbol"].isin(allowed_symbols)) &
-        (df["overlay_score"].abs() >= 0.60) &
+        (df["overlay_score"].abs() >= 0.55) &
         (df["overlay_score"].abs() < 0.75)
     ].copy()
 

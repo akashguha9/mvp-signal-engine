@@ -2,7 +2,7 @@ import pandas as pd
 from utils import save_csv, print_stage
 
 ALLOWED_SYMBOLS = ["GLD", "^GDAXI", "USO"]
-OVERLAY_FLOOR = 0.60
+OVERLAY_FLOOR = 0.55
 OVERLAY_CEILING = 0.75
 COST_PER_TRADE = 0.002  # 20 bps round-trip cost
 
