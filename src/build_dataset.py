@@ -14,17 +14,18 @@ def build_final_dataset() -> None:
     prices = prices.dropna(subset=["Date"]).copy()
     poly = poly.dropna(subset=["Date"]).copy()
 
-    # Daily market-wide mean belief across currently fetched Polymarket markets
+    # build one daily belief series across currently fetched Polymarket markets
     poly_daily = (
         poly.groupby("Date", as_index=False)["polymarket_prob"]
         .mean()
         .rename(columns={"polymarket_prob": "belief_mean"})
         .sort_values("Date")
+        .reset_index(drop=True)
     )
 
-    # As-of merge so nearest recent belief value is used
-    prices = prices.sort_values(["symbol", "Date"]).copy()
-    poly_daily = poly_daily.sort_values("Date").copy()
+    # IMPORTANT: merge_asof requires strict sorting by the join key
+    prices = prices.sort_values("Date").reset_index(drop=True)
+    poly_daily = poly_daily.sort_values("Date").reset_index(drop=True)
 
     merged = pd.merge_asof(
         prices,
@@ -34,10 +35,11 @@ def build_final_dataset() -> None:
         tolerance=pd.Timedelta("7D"),
     )
 
-    # Forward fill within each symbol so sparse belief days still carry forward
+    # forward fill inside each symbol
+    merged = merged.sort_values(["symbol", "Date"]).reset_index(drop=True)
     merged["belief_mean"] = merged.groupby("symbol")["belief_mean"].ffill()
 
-    # Belief features
+    # belief features
     merged["b_change"] = merged.groupby("symbol")["belief_mean"].diff(1)
     merged["b_momentum_3"] = merged.groupby("symbol")["belief_mean"].transform(
         lambda s: s.rolling(3, min_periods=1).mean()
@@ -45,9 +47,6 @@ def build_final_dataset() -> None:
     merged["b_volatility_3"] = merged.groupby("symbol")["belief_mean"].transform(
         lambda s: s.rolling(3, min_periods=1).std()
     )
-
-    # Simple target helpers already available from prices file:
-    # return_1d, return_3d, return_5d
 
     save_csv(merged, "data/processed/final_dataset.csv")
     print(f"Final dataset rows: {len(merged)}")
