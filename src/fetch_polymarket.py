@@ -1,7 +1,7 @@
 import pandas as pd
 
-from config import POLY_GAMMA_BASE, MAX_POLYMARKETS
-from utils import save_csv, safe_get, print_stage
+from config import POLY_GAMMA_BASE, POLY_CLOB_BASE, MAX_POLYMARKETS, START_DATE, END_DATE
+from utils import save_csv, safe_get, safe_json_loads, safe_float, print_stage, to_unix_ts
 
 
 ALLOW_TERMS = {
@@ -14,11 +14,14 @@ ALLOW_TERMS = {
 }
 
 BLOCK_TERMS = {
-    "gta", "album", "rihanna", "playboi carti", "harvey weinstein",
+    "gta", "album", "rihanna", "playboi", "carti", "harvey weinstein",
     "movie", "oscar", "grammy", "celebrity", "dating", "weather",
     "nba", "nfl", "mlb", "nhl", "soccer", "football", "tennis", "golf",
     "team", "match", "game", "player", "super bowl"
 }
+
+CHUNK_DAYS = 7
+CHUNK_SECONDS = CHUNK_DAYS * 24 * 3600
 
 
 def _extract_market_list(payload) -> list[dict]:
@@ -38,11 +41,79 @@ def _norm(text: str) -> str:
 
 def _is_relevant_market(question: str, description: str, category: str) -> bool:
     text = " ".join([_norm(question), _norm(description), _norm(category)])
-
     if any(term in text for term in BLOCK_TERMS):
         return False
-
     return any(term in text for term in ALLOW_TERMS)
+
+
+def _extract_token_ids(raw) -> list[str]:
+    raw = safe_json_loads(raw)
+
+    if raw is None:
+        return []
+
+    if isinstance(raw, list):
+        return [str(x).strip() for x in raw if str(x).strip()]
+
+    if isinstance(raw, str):
+        cleaned = raw.strip()
+        if cleaned.startswith("[") and cleaned.endswith("]"):
+            cleaned = cleaned.replace("'", '"')
+            try:
+                parsed = safe_json_loads(cleaned)
+                if isinstance(parsed, list):
+                    return [str(x).strip() for x in parsed if str(x).strip()]
+            except Exception:
+                pass
+
+            inner = cleaned.strip("[]").replace('"', "").replace("'", "")
+            parts = [p.strip() for p in inner.split(",") if p.strip()]
+            return parts
+
+        return [cleaned]
+
+    return []
+
+
+def _extract_history_rows(payload) -> list[dict]:
+    if isinstance(payload, dict):
+        for key in ["history", "data", "pricesHistory", "prices_history"]:
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value
+    if isinstance(payload, list):
+        return payload
+    return []
+
+
+def _parse_history_row(h: dict) -> tuple[pd.Timestamp | None, float | None]:
+    ts = h.get("t")
+    price = h.get("p")
+
+    if ts is None:
+        ts = h.get("timestamp")
+    if price is None:
+        price = h.get("price")
+    if price is None:
+        price = h.get("y")
+
+    if ts is None or price is None:
+        return None, None
+
+    try:
+        unit = "ms" if len(str(int(ts))) >= 13 else "s"
+        dt = pd.to_datetime(ts, unit=unit).floor("D")
+    except Exception:
+        return None, None
+
+    prob = safe_float(price)
+    if prob is None:
+        return None, None
+
+    if prob > 1:
+        prob = prob / 100.0
+
+    return dt, prob
 
 
 def fetch_polymarket_markets(limit: int = MAX_POLYMARKETS) -> pd.DataFrame:
@@ -101,5 +172,111 @@ def fetch_polymarket_markets(limit: int = MAX_POLYMARKETS) -> pd.DataFrame:
     return df
 
 
+def fetch_polymarket_daily_prices(markets_df: pd.DataFrame) -> None:
+    print_stage("Fetching Polymarket daily prices")
+
+    out_cols = ["market_id", "poly_token_id", "Date", "polymarket_prob"]
+
+    if markets_df.empty:
+        save_csv(pd.DataFrame(columns=out_cols), "data/processed/polymarket_prices_daily.csv")
+        print("No Polymarket metadata available.")
+        return
+
+    if "is_relevant" in markets_df.columns:
+        markets_df = markets_df[markets_df["is_relevant"] == True].copy()
+
+    start_ts = to_unix_ts(START_DATE)
+    end_ts = to_unix_ts(END_DATE)
+
+    rows = []
+    attempted_markets = 0
+    token_markets = 0
+    successful_markets = 0
+    successful_chunks = 0
+    debug_failures = 0
+
+    for _, row in markets_df.iterrows():
+        market_id = row.get("market_id")
+        token_ids = _extract_token_ids(row.get("clob_token_ids"))
+
+        if not market_id:
+            continue
+
+        attempted_markets += 1
+
+        if not token_ids:
+            continue
+
+        token_markets += 1
+        market_had_rows = False
+
+        for token_id in token_ids[:1]:
+            current_start = start_ts
+
+            while current_start < end_ts:
+                current_end = min(current_start + CHUNK_SECONDS, end_ts)
+
+                try:
+                    payload = safe_get(
+                        f"{POLY_CLOB_BASE}/prices-history",
+                        params={
+                            "market": token_id,
+                            "startTs": current_start,
+                            "endTs": current_end,
+                            "interval": "1d",
+                        },
+                    )
+
+                    history_rows = _extract_history_rows(payload)
+
+                    if history_rows:
+                        successful_chunks += 1
+
+                    for h in history_rows:
+                        dt, prob = _parse_history_row(h)
+                        if dt is None or prob is None:
+                            continue
+
+                        rows.append({
+                            "market_id": market_id,
+                            "poly_token_id": token_id,
+                            "Date": dt,
+                            "polymarket_prob": prob,
+                        })
+                        market_had_rows = True
+
+                except Exception as e:
+                    if debug_failures < 5:
+                        print(
+                            f"[POLY DEBUG] chunk failed | market_id={market_id} | token_id={token_id} | "
+                            f"chunk_start={current_start} | chunk_end={current_end} | error={e}"
+                        )
+                        debug_failures += 1
+
+                current_start = current_end
+
+        if market_had_rows:
+            successful_markets += 1
+
+    df = pd.DataFrame(rows, columns=out_cols)
+
+    if not df.empty:
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.floor("D")
+        df = df.dropna(subset=["Date", "polymarket_prob"])
+        df = (
+            df.sort_values(["market_id", "Date", "poly_token_id"])
+              .drop_duplicates(["market_id", "Date"], keep="first")
+        )
+
+    save_csv(df, "data/processed/polymarket_prices_daily.csv")
+
+    print(f"Polymarket relevant markets attempted: {attempted_markets}")
+    print(f"Polymarket markets with token IDs: {token_markets}")
+    print(f"Polymarket markets with successful history: {successful_markets}")
+    print(f"Polymarket successful chunks: {successful_chunks}")
+    print(f"Polymarket daily price rows: {len(df)}")
+
+
 if __name__ == "__main__":
-    fetch_polymarket_markets()
+    markets = fetch_polymarket_markets()
+    fetch_polymarket_daily_prices(markets)
