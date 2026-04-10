@@ -1,0 +1,2 @@
+rule,n_trades,symbols,mean_ret_1d,mean_ret_5d,hit_1d,hit_5d
+long_only_mid_bucket_best_symbols,307,"GLD,^GDAXI,USO",0.0018436307744989654,0.010161012059685995,0.5504885993485342,0.6319218241042345

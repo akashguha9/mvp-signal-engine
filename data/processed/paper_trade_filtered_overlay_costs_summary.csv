@@ -1,0 +1,2 @@
+rule,n_trades,cost_per_trade,mean_ret_1d_after_cost,mean_ret_5d_after_cost,hit_1d_after_cost,hit_5d_after_cost
+filtered_champion_after_cost,307,0.002,-0.00015636922550103495,0.008161012059685991,0.498371335504886,0.6026058631921825
