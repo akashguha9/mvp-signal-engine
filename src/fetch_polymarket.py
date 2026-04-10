@@ -21,8 +21,8 @@ BLOCK_TERMS = {
     "team", "match", "game", "player", "super bowl"
 }
 
-MAX_RELEVANT_MARKETS_TO_FETCH = 5
-LOOKBACK_DAYS = 7
+MAX_RELEVANT_MARKETS_TO_FETCH = 10
+LOOKBACK_DAYS = 14
 
 
 def _extract_market_list(payload) -> list[dict]:

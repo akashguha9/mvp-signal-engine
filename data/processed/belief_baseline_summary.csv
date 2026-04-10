@@ -1,2 +1,4 @@
-rows_with_belief,active_signals,long_signals,short_signals,acc_1d,acc_5d
-6,0,0,0,,
+rule,rows_with_belief,active_signals,long_signals,short_signals,acc_1d,acc_5d
+belief_vs_momentum3,6,6,6,0,0.6666666666666666,0.6666666666666666
+belief_change,6,0,0,0,,
+belief_zscore_3,6,0,0,0,,
