@@ -1,28 +1,9 @@
 import pandas as pd
 
-df = pd.read_csv("data/processed/final_dataset.csv")
-df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
 
-work = df.dropna(subset=["belief_mean"]).copy()
-
-# Rule A: belief vs rolling mean
-work["signal_a"] = 0
-work.loc[work["belief_mean"] >= work["b_momentum_3"], "signal_a"] = 1
-work.loc[work["belief_mean"] < work["b_momentum_3"], "signal_a"] = -1
-
-# Rule B: daily belief change
-work["signal_b"] = 0
-work.loc[work["b_change"] > 0, "signal_b"] = 1
-work.loc[work["b_change"] < 0, "signal_b"] = -1
-
-# Rule C: belief z-score
-work["signal_c"] = 0
-work.loc[work["b_zscore_3"] > 0, "signal_c"] = 1
-work.loc[work["b_zscore_3"] < 0, "signal_c"] = -1
-
-
-def score(active: pd.DataFrame, signal_col: str):
+def score(active: pd.DataFrame, signal_col: str) -> dict:
     active = active[active[signal_col] != 0].copy()
+
     if len(active) == 0:
         return {
             "active_signals": 0,
@@ -51,11 +32,42 @@ def score(active: pd.DataFrame, signal_col: str):
     }
 
 
-summary = pd.DataFrame([
-    {"rule": "belief_vs_momentum3", "rows_with_belief": len(work), **score(work, "signal_a")},
-    {"rule": "belief_change", "rows_with_belief": len(work), **score(work, "signal_b")},
-    {"rule": "belief_zscore_3", "rows_with_belief": len(work), **score(work, "signal_c")},
-])
+def main() -> None:
+    df = pd.read_csv("data/processed/final_dataset.csv")
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
 
-summary.to_csv("data/processed/belief_baseline_summary.csv", index=False)
-print(summary.to_string(index=False))
+    work = df.dropna(subset=["belief_mean"]).copy()
+
+    # Rule A: belief vs rolling momentum
+    work["signal_a"] = 0
+    work.loc[work["belief_mean"] >= work["b_momentum_3"], "signal_a"] = 1
+    work.loc[work["belief_mean"] < work["b_momentum_3"], "signal_a"] = -1
+
+    # Rule B: daily change in belief
+    work["signal_b"] = 0
+    work.loc[work["b_change"] > 0, "signal_b"] = 1
+    work.loc[work["b_change"] < 0, "signal_b"] = -1
+
+    # Rule C: z-score of belief
+    work["signal_c"] = 0
+    work.loc[work["b_zscore_3"] > 0, "signal_c"] = 1
+    work.loc[work["b_zscore_3"] < 0, "signal_c"] = -1
+
+    # Rule D: theme-aware master belief threshold
+    work["signal_d"] = 0
+    work.loc[work["belief_mean"] >= 0.50, "signal_d"] = 1
+    work.loc[work["belief_mean"] < 0.50, "signal_d"] = -1
+
+    summary = pd.DataFrame([
+        {"rule": "belief_vs_momentum3", "rows_with_belief": len(work), **score(work, "signal_a")},
+        {"rule": "belief_change", "rows_with_belief": len(work), **score(work, "signal_b")},
+        {"rule": "belief_zscore_3", "rows_with_belief": len(work), **score(work, "signal_c")},
+        {"rule": "belief_threshold_0_50", "rows_with_belief": len(work), **score(work, "signal_d")},
+    ])
+
+    summary.to_csv("data/processed/belief_baseline_summary.csv", index=False)
+    print(summary.to_string(index=False))
+
+
+if __name__ == "__main__":
+    main()
