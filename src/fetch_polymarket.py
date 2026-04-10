@@ -1,3 +1,4 @@
+import time
 import pandas as pd
 
 from config import POLY_GAMMA_BASE, POLY_CLOB_BASE, MAX_POLYMARKETS
@@ -20,8 +21,8 @@ BLOCK_TERMS = {
     "team", "match", "game", "player", "super bowl"
 }
 
-# SAFE CAP FOR NOW
-MAX_RELEVANT_MARKETS_TO_FETCH = 15
+MAX_RELEVANT_MARKETS_TO_FETCH = 5
+LOOKBACK_DAYS = 7
 
 
 def _extract_market_list(payload) -> list[dict]:
@@ -164,7 +165,12 @@ def fetch_polymarket_markets(limit: int = MAX_POLYMARKETS) -> pd.DataFrame:
 
     if relevant > 0:
         print("\nTop relevant Polymarket markets preview:")
-        print(df[df["is_relevant"] == True][["market_id", "question", "category"]].head(20).to_string())
+        print(
+            df[df["is_relevant"] == True][["market_id", "question", "end_date"]]
+            .sort_values("end_date")
+            .head(20)
+            .to_string()
+        )
 
     return df
 
@@ -182,11 +188,20 @@ def fetch_polymarket_daily_prices(markets_df: pd.DataFrame) -> None:
     if "is_relevant" in markets_df.columns:
         markets_df = markets_df[markets_df["is_relevant"] == True].copy()
 
-    markets_df = markets_df.head(MAX_RELEVANT_MARKETS_TO_FETCH).copy()
+    markets_df["end_date"] = pd.to_datetime(markets_df["end_date"], errors="coerce")
+    markets_df = (
+        markets_df.dropna(subset=["end_date"])
+        .sort_values("end_date")
+        .head(MAX_RELEVANT_MARKETS_TO_FETCH)
+        .copy()
+    )
 
     rows = []
     attempted = 0
     success = 0
+
+    now = int(time.time())
+    start = now - LOOKBACK_DAYS * 24 * 3600
 
     for _, row in markets_df.iterrows():
         market_id = row.get("market_id")
@@ -199,10 +214,6 @@ def fetch_polymarket_daily_prices(markets_df: pd.DataFrame) -> None:
         attempted += 1
 
         try:
-            import time
-            now = int(time.time())
-            start = now - 30 * 24 * 3600
-
             payload = safe_get(
                 f"{POLY_CLOB_BASE}/prices-history",
                 params={
@@ -214,7 +225,6 @@ def fetch_polymarket_daily_prices(markets_df: pd.DataFrame) -> None:
             )
 
             history_rows = _extract_history_rows(payload)
-
             if history_rows:
                 success += 1
 
@@ -230,7 +240,10 @@ def fetch_polymarket_daily_prices(markets_df: pd.DataFrame) -> None:
                     "polymarket_prob": prob,
                 })
 
-            print(f"Fetched market_id={market_id} | token_id={token_id[:18]}... | history_rows={len(history_rows)}")
+            print(
+                f"Fetched market_id={market_id} | end_date={row.get('end_date')} | "
+                f"token_id={token_id[:18]}... | history_rows={len(history_rows)}"
+            )
 
         except Exception as e:
             print(f"[POLY DEBUG] market_id={market_id} failed: {e}")
@@ -242,8 +255,8 @@ def fetch_polymarket_daily_prices(markets_df: pd.DataFrame) -> None:
         df = df.dropna(subset=["Date", "polymarket_prob"])
         df = (
             df.sort_values(["market_id", "Date", "poly_token_id"])
-              .groupby(["market_id", "poly_token_id", "Date"], as_index=False)["polymarket_prob"]
-              .last()
+            .groupby(["market_id", "poly_token_id", "Date"], as_index=False)["polymarket_prob"]
+            .last()
         )
 
     save_csv(df, "data/processed/polymarket_prices_daily.csv")

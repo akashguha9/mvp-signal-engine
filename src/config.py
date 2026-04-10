@@ -1,7 +1,7 @@
 import os
 
 START_DATE = os.getenv("START_DATE", "2021-08-01")
-END_DATE = os.getenv("END_DATE", "2026-04-09")
+END_DATE = os.getenv("END_DATE", "2026-04-12")
 
 SYMBOLS = [s.strip() for s in os.getenv("SYMBOLS", "SPY,QQQ,^GDAXI,^VIX,GLD,USO").split(",") if s.strip()]
 
