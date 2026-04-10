@@ -22,7 +22,12 @@ BLOCK_TERMS = {
 }
 
 MAX_RELEVANT_MARKETS_TO_FETCH = 10
-LOOKBACK_DAYS = 7
+
+# total historical target
+LOOKBACK_DAYS = 365
+
+# request in safe chunks
+CHUNK_DAYS = 7
 
 
 def _extract_market_list(payload) -> list[dict]:
@@ -84,7 +89,7 @@ def _extract_history_rows(payload) -> list[dict]:
     return []
 
 
-def _parse_history_row(h: dict) -> tuple[pd.Timestamp | None, float | None]:
+def _parse_history_row(h: dict):
     ts = h.get("t")
     price = h.get("p")
 
@@ -201,7 +206,8 @@ def fetch_polymarket_daily_prices(markets_df: pd.DataFrame) -> None:
     success = 0
 
     now = int(time.time())
-    start = now - LOOKBACK_DAYS * 24 * 3600
+    full_start = now - LOOKBACK_DAYS * 24 * 3600
+    chunk_seconds = CHUNK_DAYS * 24 * 3600
 
     for _, row in markets_df.iterrows():
         market_id = row.get("market_id")
@@ -212,41 +218,61 @@ def fetch_polymarket_daily_prices(markets_df: pd.DataFrame) -> None:
 
         token_id = str(token_ids[0])
         attempted += 1
+        market_rows_before = len(rows)
 
-        try:
-            payload = safe_get(
-                f"{POLY_CLOB_BASE}/prices-history",
-                params={
-                    "market": token_id,
-                    "startTs": start,
-                    "endTs": now,
-                    "interval": "1d",
-                },
-            )
+        chunk_start = full_start
+        chunk_success = 0
 
-            history_rows = _extract_history_rows(payload)
-            if history_rows:
-                success += 1
+        while chunk_start < now:
+            chunk_end = min(chunk_start + chunk_seconds, now)
 
-            for h in history_rows:
-                dt, prob = _parse_history_row(h)
-                if dt is None or prob is None:
-                    continue
+            try:
+                payload = safe_get(
+                    f"{POLY_CLOB_BASE}/prices-history",
+                    params={
+                        "market": token_id,
+                        "startTs": chunk_start,
+                        "endTs": chunk_end,
+                        "interval": "1d",
+                    },
+                )
 
-                rows.append({
-                    "market_id": market_id,
-                    "poly_token_id": token_id,
-                    "Date": dt,
-                    "polymarket_prob": prob,
-                })
+                history_rows = _extract_history_rows(payload)
 
-            print(
-                f"Fetched market_id={market_id} | end_date={row.get('end_date')} | "
-                f"token_id={token_id[:18]}... | history_rows={len(history_rows)}"
-            )
+                for h in history_rows:
+                    dt, prob = _parse_history_row(h)
+                    if dt is None or prob is None:
+                        continue
 
-        except Exception as e:
-            print(f"[POLY DEBUG] market_id={market_id} failed: {e}")
+                    rows.append({
+                        "market_id": market_id,
+                        "poly_token_id": token_id,
+                        "Date": dt,
+                        "polymarket_prob": prob,
+                    })
+
+                if len(history_rows) > 0:
+                    chunk_success += 1
+
+            except Exception as e:
+                print(
+                    f"[POLY DEBUG] market_id={market_id} chunk "
+                    f"{pd.to_datetime(chunk_start, unit='s').date()} -> "
+                    f"{pd.to_datetime(chunk_end, unit='s').date()} failed: {e}"
+                )
+
+            chunk_start = chunk_end + 1
+
+        market_rows_after = len(rows)
+
+        if market_rows_after > market_rows_before:
+            success += 1
+
+        print(
+            f"Fetched market_id={market_id} | end_date={row.get('end_date')} | "
+            f"token_id={token_id[:18]}... | chunk_success={chunk_success} | "
+            f"new_rows={market_rows_after - market_rows_before}"
+        )
 
     df = pd.DataFrame(rows, columns=out_cols)
 
