@@ -1,49 +1,38 @@
 import pandas as pd
+from utils import save_csv, print_stage
 
-INPUT_PATH = "data/processed/output_timeseries_dataset.csv"
-LOG_PATH = "data/processed/paper_trade_filtered_overlay_log.csv"
-SUMMARY_PATH = "data/processed/paper_trade_filtered_overlay_summary.csv"
 
-OVERLAY_FLOOR = 0.55
-OVERLAY_CEILING = 0.75
-ALLOWED_SYMBOLS = ["GLD", "^GDAXI"]  # ✅ USO REMOVED
+def main() -> None:
+    print_stage("Backtesting filtered overlay")
 
-def main():
-    print("[STAGE] Backtesting filtered overlay")
+    df = pd.read_csv("data/processed/paper_trade_overlay_log.csv")
+    df["entry_date"] = pd.to_datetime(df["entry_date"], errors="coerce")
 
-    df = pd.read_csv(INPUT_PATH)
-    df["Date"] = pd.to_datetime(df["Date"])
+    allowed_symbols = ["GLD", "^GDAXI", "USO"]
 
-    # Champion filter
-    df = df[
-        (df["signal"] == 1) &
-        (df["symbol"].isin(ALLOWED_SYMBOLS)) &
-        (df["overlay_score"].abs() >= OVERLAY_FLOOR) &
-        (df["overlay_score"].abs() < OVERLAY_CEILING)
+    filtered = df[
+        (df["direction"] == 1) &
+        (df["symbol"].isin(allowed_symbols)) &
+        (df["overlay_score"].abs() >= 0.55) &
+        (df["overlay_score"].abs() < 0.75)
     ].copy()
-
-    df["ret_1d_realized"] = (df["exit_price_1d"] - df["entry_price"]) / df["entry_price"]
-    df["ret_5d_realized"] = (df["exit_price_5d"] - df["entry_price"]) / df["entry_price"]
-
-    df["hit_1d_realized"] = (df["ret_1d_realized"] > 0).astype(int)
-    df["hit_5d_realized"] = (df["ret_5d_realized"] > 0).astype(int)
-
-    df.to_csv(LOG_PATH, index=False)
 
     summary = pd.DataFrame([{
         "rule": "long_only_mid_bucket_best_symbols",
-        "n_trades": len(df),
-        "symbols": ",".join(ALLOWED_SYMBOLS),
-        "mean_ret_1d": df["ret_1d_realized"].mean(),
-        "mean_ret_5d": df["ret_5d_realized"].mean(),
-        "hit_1d": df["hit_1d_realized"].mean(),
-        "hit_5d": df["hit_5d_realized"].mean()
+        "n_trades": len(filtered),
+        "symbols": ",".join(allowed_symbols),
+        "mean_ret_1d": filtered["ret_1d_realized"].mean(),
+        "mean_ret_5d": filtered["ret_5d_realized"].mean(),
+        "hit_1d": filtered["hit_1d_realized"].mean(),
+        "hit_5d": filtered["hit_5d_realized"].mean(),
     }])
 
-    summary.to_csv(SUMMARY_PATH, index=False)
+    save_csv(filtered, "data/processed/paper_trade_filtered_overlay_log.csv")
+    save_csv(summary, "data/processed/paper_trade_filtered_overlay_summary.csv")
 
-    print(f"Saved: {LOG_PATH} | Rows: {len(df)}")
-    print(f"Saved: {SUMMARY_PATH} | Rows: {len(summary)}")
+    print(filtered.head(30).to_string(index=False))
+    print("\nSummary:")
+    print(summary.to_string(index=False))
 
 
 if __name__ == "__main__":

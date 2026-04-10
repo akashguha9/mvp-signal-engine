@@ -1,52 +1,47 @@
 import pandas as pd
+from utils import save_csv, print_stage
 
-INPUT_PATH = "data/processed/output_timeseries_dataset.csv"
-OUTPUT_PATH = "data/processed/walkforward_filtered_champion_summary.csv"
 
-OVERLAY_FLOOR = 0.55
-OVERLAY_CEILING = 0.75
-ALLOWED_SYMBOLS = ["GLD", "^GDAXI"]  # ✅ UPDATED
+ALLOWED_SYMBOLS = ["GLD", "^GDAXI", "USO"]
 
-SPLIT_DATE = "2023-01-01"
 
-def compute_metrics(df):
+def summarize(df: pd.DataFrame, label: str) -> dict:
     return {
+        "dataset": label,
+        "rule": "filtered_champion",
         "n_trades": len(df),
-        "mean_ret_1d": df["ret_1d_realized"].mean(),
-        "mean_ret_5d": df["ret_5d_realized"].mean(),
-        "hit_1d": (df["ret_1d_realized"] > 0).mean(),
-        "hit_5d": (df["ret_5d_realized"] > 0).mean()
+        "mean_ret_1d": df["ret_1d_realized"].mean() if len(df) else None,
+        "mean_ret_5d": df["ret_5d_realized"].mean() if len(df) else None,
+        "hit_1d": df["hit_1d_realized"].mean() if len(df) else None,
+        "hit_5d": df["hit_5d_realized"].mean() if len(df) else None,
     }
 
-def main():
-    print("[STAGE] Walkforward filtered champion")
 
-    df = pd.read_csv(INPUT_PATH)
-    df["Date"] = pd.to_datetime(df["Date"])
+def main() -> None:
+    print_stage("Walkforward filtered champion")
+
+    df = pd.read_csv("data/processed/paper_trade_overlay_log.csv")
+    df["entry_date"] = pd.to_datetime(df["entry_date"], errors="coerce")
 
     df = df[
-        (df["signal"] == 1) &
+        (df["direction"] == 1) &
         (df["symbol"].isin(ALLOWED_SYMBOLS)) &
-        (df["overlay_score"].abs() >= OVERLAY_FLOOR) &
-        (df["overlay_score"].abs() < OVERLAY_CEILING)
+        (df["overlay_score"].abs() >= 0.50) &
+        (df["overlay_score"].abs() < 0.75)
     ].copy()
 
-    df["ret_1d_realized"] = (df["exit_price_1d"] - df["entry_price"]) / df["entry_price"]
-    df["ret_5d_realized"] = (df["exit_price_5d"] - df["entry_price"]) / df["entry_price"]
+    split_date = df["entry_date"].quantile(0.7)
 
-    train = df[df["Date"] < SPLIT_DATE]
-    test = df[df["Date"] >= SPLIT_DATE]
+    train = df[df["entry_date"] <= split_date].copy()
+    test = df[df["entry_date"] > split_date].copy()
 
-    results = []
+    summary = pd.DataFrame([
+        summarize(train, "train"),
+        summarize(test, "test"),
+    ])
 
-    for name, subset in [("train", train), ("test", test)]:
-        metrics = compute_metrics(subset)
-        metrics.update({"dataset": name, "rule": "filtered_champion"})
-        results.append(metrics)
-
-    pd.DataFrame(results).to_csv(OUTPUT_PATH, index=False)
-
-    print(f"Saved: {OUTPUT_PATH} | Rows: {len(results)}")
+    save_csv(summary, "data/processed/walkforward_filtered_champion_summary.csv")
+    print(summary.to_string(index=False))
 
 
 if __name__ == "__main__":
