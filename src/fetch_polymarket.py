@@ -21,7 +21,7 @@ BLOCK_TERMS = {
 }
 
 # SAFE CAP FOR NOW
-MAX_RELEVANT_MARKETS_TO_FETCH = 5
+MAX_RELEVANT_MARKETS_TO_FETCH = 15
 
 
 def _extract_market_list(payload) -> list[dict]:
@@ -201,7 +201,7 @@ def fetch_polymarket_daily_prices(markets_df: pd.DataFrame) -> None:
         try:
             import time
             now = int(time.time())
-            start = now - 7 * 24 * 3600
+            start = now - 30 * 24 * 3600
 
             payload = safe_get(
                 f"{POLY_CLOB_BASE}/prices-history",
