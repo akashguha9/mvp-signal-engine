@@ -1,0 +1,2 @@
+rule,active_signals,long_signals,short_signals,acc_1d,acc_5d
+overlay_gated,4596,2350,2246,0.5596170583115753,0.651218450826806

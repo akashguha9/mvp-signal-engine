@@ -1,0 +1,4 @@
+rule,active_signals,long_signals,short_signals,acc_1d,acc_5d
+price_only,4597,2350,2247,0.5597128562105721,0.6512943223841636
+overlay,4089,2105,1984,0.5629738322328197,0.661041819515774
+belief_only,4,4,0,0.5,0.5
